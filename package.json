@@ -1,0 +1,82 @@
+{
+  "name": "@hasna/tenants",
+  "version": "0.1.0",
+  "description": "Hasna fleet tenant auth / IdP: tenants, users, memberships, service principals, sessions + OTP login front door, and asymmetric (EdDSA) fleet token issuance with a published JWKS. Distinct from @hasna/identities (the agent registry).",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "bin": {
+    "tenants": "dist/cli.js",
+    "tenants-serve": "dist/server/index.js"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./sdk": {
+      "types": "./dist/sdk/index.d.ts",
+      "import": "./dist/sdk/index.js"
+    },
+    "./db": {
+      "types": "./dist/db.d.ts",
+      "import": "./dist/db.js"
+    },
+    "./migrations": {
+      "types": "./dist/migrations.d.ts",
+      "import": "./dist/migrations.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "clean": "rm -rf dist",
+    "build": "bun run clean && bun build ./src/index.ts ./src/cli.ts ./src/server/index.ts ./src/sdk/index.ts ./src/db.ts ./src/migrations.ts --outdir dist --target bun --external pg --external @hasna/contracts && tsc --emitDeclarationOnly --outDir dist",
+    "typecheck": "tsc --noEmit",
+    "test": "bun test",
+    "dev:cli": "bun run src/cli.ts",
+    "dev:serve": "bun run src/server/index.ts",
+    "verify:release": "bun run typecheck && bun test && bun run build"
+  },
+  "keywords": [
+    "tenants",
+    "tenancy",
+    "idp",
+    "auth",
+    "login",
+    "jwks",
+    "eddsa",
+    "fleet",
+    "cli"
+  ],
+  "publishConfig": {
+    "registry": "https://registry.npmjs.org",
+    "access": "restricted"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/hasna/tenants.git"
+  },
+  "homepage": "https://github.com/hasna/tenants",
+  "bugs": {
+    "url": "https://github.com/hasna/tenants/issues"
+  },
+  "engines": {
+    "bun": ">=1.0.0"
+  },
+  "author": "Andrei Hasna <andrei@hasna.com>",
+  "license": "Apache-2.0",
+  "devDependencies": {
+    "@types/bun": "^1.2.4",
+    "@types/node": "^22.13.4",
+    "@types/pg": "^8.11.10",
+    "typescript": "^5.7.3"
+  },
+  "dependencies": {
+    "@hasna/contracts": "0.4.2",
+    "pg": "^8.16.3"
+  }
+}
