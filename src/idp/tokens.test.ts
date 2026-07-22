@@ -1,8 +1,11 @@
 import { describe, expect, test } from "bun:test";
 import { generateKeyPairSync } from "node:crypto";
 import {
+  boundedTtlSeconds,
   buildJwks,
+  DEFAULT_ACCESS_TOKEN_TTL_SECONDS,
   looksLikeAccessToken,
+  MAX_ACCESS_TOKEN_TTL_SECONDS,
   signAccessToken,
   signingKeyFromPrivateJwk,
   verifyAccessToken,
@@ -66,6 +69,33 @@ describe("EdDSA access tokens", () => {
     const forged = `${h}.${forgedPayload}.${s}`;
     const result = verifyAccessToken(forged, { jwks: [key.publicJwk] });
     expect(result.ok).toBe(false);
+  });
+
+  test("caller-requested TTL above the ceiling is CLAMPED, never honored", () => {
+    const key = freshKey();
+    const tenYears = 315_360_000;
+    const { claims } = signAccessToken(key, {
+      aud: "todos", sub: "u", tid: "t", pt: "user", scope: [], jti: "j",
+      ttlSeconds: tenYears,
+    });
+    expect(claims.exp - claims.iat).toBe(MAX_ACCESS_TOKEN_TTL_SECONDS);
+  });
+
+  test("a shorter TTL is honored; omitted TTL uses the default", () => {
+    const key = freshKey();
+    const short = signAccessToken(key, { aud: "todos", sub: "u", tid: "t", pt: "user", scope: [], jti: "j", ttlSeconds: 60 });
+    expect(short.claims.exp - short.claims.iat).toBe(60);
+    const dflt = signAccessToken(key, { aud: "todos", sub: "u", tid: "t", pt: "user", scope: [], jti: "j" });
+    expect(dflt.claims.exp - dflt.claims.iat).toBe(DEFAULT_ACCESS_TOKEN_TTL_SECONDS);
+  });
+
+  test("non-positive / non-integer TTLs are rejected", () => {
+    const key = freshKey();
+    for (const bad of [0, -5, 1.5, Number.NaN, Number.POSITIVE_INFINITY]) {
+      expect(() => signAccessToken(key, { aud: "x", sub: "u", tid: "t", pt: "user", scope: [], jti: "j", ttlSeconds: bad }))
+        .toThrow("ttlSeconds must be a positive integer");
+    }
+    expect(boundedTtlSeconds(undefined)).toBe(DEFAULT_ACCESS_TOKEN_TTL_SECONDS);
   });
 
   test("looksLikeAccessToken distinguishes JWS from HMAC keys", () => {

@@ -71,6 +71,17 @@ class FakeIdpStore implements IdpStoreApi {
   async bumpChallengeAttempts(id: string): Promise<void> { const c = this.challenges.find((x) => x.id === id); if (c) c.attempts += 1; }
   async recordApiKeyBinding(_t: string, input: any): Promise<void> { this.bindings.set(input.kid, { tenant_id: input.tenantId, user_id: input.userId, principal_type: input.principalType }); }
   async lookupApiKeyBinding(_t: string, kid: string) { return this.bindings.get(kid) ?? null; }
+  issued = new Map<string, { user_id: string | null; tenant_id: string | null; aud: string; expiresAt: number; revokedAt: number | null }>();
+  async recordIssuedAccessToken(input: { jti: string; userId: string | null; tenantId: string | null; aud: string; expiresAt: Date }): Promise<void> {
+    this.issued.set(input.jti, { user_id: input.userId, tenant_id: input.tenantId, aud: input.aud, expiresAt: input.expiresAt.getTime(), revokedAt: null });
+  }
+  async revokeIssuedAccessToken(jti: string, userId: string): Promise<boolean> {
+    const t = this.issued.get(jti);
+    if (!t || t.user_id !== userId || t.revokedAt !== null) return false;
+    t.revokedAt = Date.now();
+    return true;
+  }
+  async isAccessTokenRevoked(jti: string): Promise<boolean> { return (this.issued.get(jti)?.revokedAt ?? null) !== null; }
 }
 
 function service(store: FakeIdpStore, otpEcho = false) {
@@ -185,6 +196,81 @@ describe("AuthService", () => {
     const s = await svc.signup({ email: "m@example.com", name: "M", password: "pw-pw-pw-pw" });
     await expect(svc.token({ sessionToken: String(s.session), app: "todos", tenant_id: newId() }))
       .rejects.toThrow("No membership for the requested tenant");
+  });
+
+  test("a caller-requested 10-year TTL is clamped to the 24h ceiling", async () => {
+    const store = new FakeIdpStore();
+    const svc = service(store);
+    const s = await svc.signup({ email: "ttl@example.com", name: "T", password: "pw-pw-pw-pw" });
+    const minted = await svc.token({ sessionToken: String(s.session), app: "todos", ttlSeconds: 315_360_000 });
+    expect(minted.expires_in).toBe(24 * 60 * 60);
+  });
+
+  test("non-positive / non-integer TTLs are rejected with invalid_ttl (400)", async () => {
+    const store = new FakeIdpStore();
+    const svc = service(store);
+    const s = await svc.signup({ email: "ttl2@example.com", name: "T2", password: "pw-pw-pw-pw" });
+    for (const bad of [0, -1, 1.5]) {
+      await expect(svc.token({ sessionToken: String(s.session), app: "todos", ttlSeconds: bad }))
+        .rejects.toThrow("ttlSeconds must be a positive integer");
+    }
+  });
+
+  test("a minted token is registered by jti and revocable by its owner", async () => {
+    const store = new FakeIdpStore();
+    const svc = service(store);
+    const s = await svc.signup({ email: "rev@example.com", name: "R", password: "pw-pw-pw-pw" });
+    const minted = await svc.token({ sessionToken: String(s.session), app: "todos" });
+    const jti = String(minted.jti);
+    expect(jti).toBeTruthy();
+    expect(await svc.isTokenRevoked(jti)).toBe(false);
+    const res = await svc.revokeToken({ sessionToken: String(s.session), jti });
+    expect(res.revoked).toBe(true);
+    expect(await svc.isTokenRevoked(jti)).toBe(true);
+  });
+
+  test("a principal cannot revoke ANOTHER user's token (owner-scoped, no leak)", async () => {
+    const store = new FakeIdpStore();
+    const svc = service(store);
+    const owner = await svc.signup({ email: "owner@example.com", name: "O", password: "pw-pw-pw-pw" });
+    const other = await svc.signup({ email: "other@example.com", name: "X", password: "pw-pw-pw-pw" });
+    const minted = await svc.token({ sessionToken: String(owner.session), app: "todos" });
+    const res = await svc.revokeToken({ sessionToken: String(other.session), jti: String(minted.jti) });
+    expect(res.revoked).toBe(false);
+    expect(await svc.isTokenRevoked(String(minted.jti))).toBe(false);
+  });
+
+  test("revoke rejects a non-UUID jti with a clean 400 invalid_request (guard fires before the store)", async () => {
+    const store = new FakeIdpStore();
+    const svc = service(store);
+    const s = await svc.signup({ email: "badjti@example.com", name: "B", password: "pw-pw-pw-pw" });
+    for (const bad of ["not-a-uuid", "1234", "'; DROP TABLE x; --", "aaaaaaaa-bbbb-cccc-dddd"]) {
+      const err = await svc.revokeToken({ sessionToken: String(s.session), jti: bad }).then(
+        () => { throw new Error(`revokeToken must reject non-UUID jti ${JSON.stringify(bad)}`); },
+        (e) => e,
+      );
+      // A typed AuthError — the HTTP layer maps it to 400 invalid_request —
+      // NOT a raw Postgres "invalid input syntax for type uuid" leak.
+      expect(err).toBeInstanceOf(AuthError);
+      expect((err as AuthError).status).toBe(400);
+      expect((err as AuthError).code).toBe("invalid_request");
+    }
+  });
+
+  test("introspect is tenant-scoped: foreign or unresolvable callers see active:false", async () => {
+    const store = new FakeIdpStore();
+    const svc = service(store);
+    store.bindings.set("kid-a", { tenant_id: "tenant-a", user_id: "u1", principal_type: "user" });
+    // Same tenant → full binding.
+    const same = await svc.introspect("kid-a", "tenant-a");
+    expect(same.active).toBe(true);
+    expect(same.tenant_id).toBe("tenant-a");
+    // Foreign tenant → fails closed without revealing the binding.
+    const foreign = await svc.introspect("kid-a", "tenant-b");
+    expect(foreign).toEqual({ active: false, kid: "kid-a" });
+    // Unresolvable caller tenant → fails closed.
+    const unknown = await svc.introspect("kid-a", null);
+    expect(unknown).toEqual({ active: false, kid: "kid-a" });
   });
 });
 

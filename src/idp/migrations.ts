@@ -18,6 +18,7 @@ export const MEMBERSHIPS_TABLE = "memberships";
 export const SESSIONS_TABLE = "sessions";
 export const AUTH_CHALLENGES_TABLE = "auth_challenges";
 export const JWT_SIGNING_KEYS_TABLE = "jwt_signing_keys";
+export const ISSUED_ACCESS_TOKENS_TABLE = "issued_access_tokens";
 
 /** Ordered, additive tenancy/IdP migrations. */
 export function idpMigrations(apiKeysTable: string): Migration[] {
@@ -145,6 +146,26 @@ export function idpMigrations(apiKeysTable: string): Migration[] {
     defineMigration(
       "tenants_0011_api_keys_tenant_idx",
       `CREATE INDEX IF NOT EXISTS ${apiKeysTable}_tenant_idx ON ${apiKeysTable} (tenant_id)`,
+    ),
+    // Issued EdDSA access-token registry: one row per minted jti so a token can
+    // be revoked BEFORE its exp (the stateless-JWT model alone cannot). Verify
+    // consults revoked_at; /v1/auth/revoke stamps it (owner-scoped).
+    defineMigration(
+      "tenants_0012_issued_access_tokens",
+      `CREATE TABLE IF NOT EXISTS ${ISSUED_ACCESS_TOKENS_TABLE} (
+         jti        UUID PRIMARY KEY,
+         user_id    UUID REFERENCES ${USERS_TABLE}(id),
+         tenant_id  UUID REFERENCES ${TENANTS_TABLE}(id),
+         aud        TEXT NOT NULL,
+         issued_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+         expires_at TIMESTAMPTZ NOT NULL,
+         revoked_at TIMESTAMPTZ
+       )`,
+    ),
+    defineMigration(
+      "tenants_0013_issued_access_tokens_user_idx",
+      `CREATE INDEX IF NOT EXISTS ${ISSUED_ACCESS_TOKENS_TABLE}_user_idx
+         ON ${ISSUED_ACCESS_TOKENS_TABLE} (user_id, issued_at DESC)`,
     ),
   ];
 }

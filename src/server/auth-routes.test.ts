@@ -1,10 +1,10 @@
 import { beforeAll, describe, expect, test } from "bun:test";
-import { generateKeyPairSync } from "node:crypto";
+import { generateKeyPairSync, sign as edSign } from "node:crypto";
 import { AuthService } from "../idp/service.js";
 import type { IdpStoreApi, MembershipRow, SessionRow, TenantRow, UserRow } from "../idp/store.js";
-import { signingKeyFromPrivateJwk, type JwkPublic, type SigningKey } from "../idp/tokens.js";
+import { TOKEN_ALG, TOKEN_ISSUER, TOKEN_TYPE, signingKeyFromPrivateJwk, type JwkPublic, type SigningKey } from "../idp/tokens.js";
 import { ROOT_TENANT_ID, newId } from "../idp/ids.js";
-import { createFetchHandler } from "./serve.js";
+import { TENANTS_SERVE_APP, createFetchHandler } from "./serve.js";
 import type { PoolQueryClient } from "../generated/storage-kit/index.js";
 
 const SIGNING_SECRET = "test-signing-secret-for-auth-routes";
@@ -42,6 +42,17 @@ class FakeIdpStore implements IdpStoreApi {
   async bumpChallengeAttempts(id: string): Promise<void> { const c = this.challenges.find((x) => x.id === id); if (c) c.attempts += 1; }
   async recordApiKeyBinding(_t: string, input: any): Promise<void> { this.bindings.set(input.kid, { tenant_id: input.tenantId, user_id: input.userId, principal_type: input.principalType }); }
   async lookupApiKeyBinding(_t: string, kid: string) { return this.bindings.get(kid) ?? null; }
+  issued = new Map<string, { user_id: string | null; tenant_id: string | null; aud: string; expiresAt: number; revokedAt: number | null }>();
+  async recordIssuedAccessToken(input: { jti: string; userId: string | null; tenantId: string | null; aud: string; expiresAt: Date }): Promise<void> {
+    this.issued.set(input.jti, { user_id: input.userId, tenant_id: input.tenantId, aud: input.aud, expiresAt: input.expiresAt.getTime(), revokedAt: null });
+  }
+  async revokeIssuedAccessToken(jti: string, userId: string): Promise<boolean> {
+    const t = this.issued.get(jti);
+    if (!t || t.user_id !== userId || t.revokedAt !== null) return false;
+    t.revokedAt = Date.now();
+    return true;
+  }
+  async isAccessTokenRevoked(jti: string): Promise<boolean> { return (this.issued.get(jti)?.revokedAt ?? null) !== null; }
 }
 
 // A do-nothing Postgres client shim: the auth path uses the FakeIdpStore, so no
@@ -60,9 +71,10 @@ const shimClient = {
 
 describe("Tenants IdP HTTP routes", () => {
   let fetchHandler: (req: Request) => Promise<Response>;
+  let fakeStore: FakeIdpStore;
 
   beforeAll(async () => {
-    const fakeStore = new FakeIdpStore();
+    fakeStore = new FakeIdpStore();
     const auth = new AuthService({ store: fakeStore, signingSecret: SIGNING_SECRET, apiKeysTable: "api_keys", otpEcho: true });
     const built = await createFetchHandler({ client: shimClient, signingSecret: SIGNING_SECRET, auth });
     fetchHandler = built.fetch;
@@ -142,5 +154,145 @@ describe("Tenants IdP HTTP routes", () => {
   test("/v1 still rejects an anonymous request (401)", async () => {
     const res = await fetchHandler(new Request("http://x/v1/introspect?kid=x"));
     expect(res.status).toBe(401);
+  });
+
+  test("a REVOKED access token is refused on verify (401 revoked) even before exp", async () => {
+    const s = await fetchHandler(new Request("http://x/login", {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ email: "route@example.com", password: "pw-pw-pw-pw" }),
+    }));
+    const session = (await s.json()).session as string;
+    const tokenRes = await fetchHandler(new Request("http://x/v1/auth/token", {
+      method: "POST", headers: { "content-type": "application/json", authorization: `Bearer ${session}` },
+      body: JSON.stringify({ app: "tenants" }),
+    }));
+    const tokenBody = await tokenRes.json();
+    const access = tokenBody.access_token as string;
+    const jti = tokenBody.jti as string;
+    expect(jti).toBeTruthy();
+
+    // Token works before revocation…
+    const before = await fetchHandler(new Request("http://x/v1/introspect?kid=nope", { headers: { authorization: `Bearer ${access}` } }));
+    expect(before.status).toBe(200);
+
+    // …then the owner revokes it by jti…
+    const revoke = await fetchHandler(new Request("http://x/v1/auth/revoke", {
+      method: "POST", headers: { "content-type": "application/json", authorization: `Bearer ${session}` },
+      body: JSON.stringify({ jti }),
+    }));
+    expect(revoke.status).toBe(200);
+    expect((await revoke.json()).revoked).toBe(true);
+
+    // …and the SAME signature-valid, unexpired token is now refused.
+    const after = await fetchHandler(new Request("http://x/v1/introspect?kid=nope", { headers: { authorization: `Bearer ${access}` } }));
+    expect(after.status).toBe(401);
+    expect((await after.json()).reason).toBe("revoked");
+  });
+
+  test("a valid-signature tenants token WITHOUT a jti is refused (401 missing_jti), never skipping the denylist", async () => {
+    // Craft a JWS with the store's REAL signing key so signature/iss/aud/exp all
+    // pass — only the jti claim is absent. Fail-closed means this must be 401.
+    const enc = (v: unknown) => Buffer.from(JSON.stringify(v)).toString("base64url");
+    const craft = (claims: Record<string, unknown>): string => {
+      const header = { alg: TOKEN_ALG, kid: fakeStore.key.kid, typ: TOKEN_TYPE };
+      const signingInput = `${enc(header)}.${enc(claims)}`;
+      const signature = edSign(null, Buffer.from(signingInput), fakeStore.key.privateKey);
+      return `${signingInput}.${signature.toString("base64url")}`;
+    };
+    const nowSec = Math.floor(Date.now() / 1000);
+    const baseClaims = {
+      iss: TOKEN_ISSUER, aud: TENANTS_SERVE_APP, sub: newId(), tid: ROOT_TENANT_ID,
+      pt: "user", scope: ["tenants:read"], iat: nowSec, exp: nowSec + 3600,
+    };
+
+    // Control: the SAME crafted claims WITH a jti authenticate — so the failure
+    // below is attributable to the missing jti, not the crafting harness.
+    const withJti = await fetchHandler(new Request("http://x/v1/introspect?kid=nope", {
+      headers: { authorization: `Bearer ${craft({ ...baseClaims, jti: newId() })}` },
+    }));
+    expect(withJti.status).toBe(200);
+
+    // No jti → rejected outright (the denylist can never vouch for this token).
+    const res = await fetchHandler(new Request("http://x/v1/introspect?kid=nope", {
+      headers: { authorization: `Bearer ${craft(baseClaims)}` },
+    }));
+    expect(res.status).toBe(401);
+    expect((await res.json()).reason).toBe("missing_jti");
+
+    // An empty-string jti is equally unverifiable against the denylist.
+    const empty = await fetchHandler(new Request("http://x/v1/introspect?kid=nope", {
+      headers: { authorization: `Bearer ${craft({ ...baseClaims, jti: "" })}` },
+    }));
+    expect(empty.status).toBe(401);
+    expect((await empty.json()).reason).toBe("missing_jti");
+  });
+
+  test("revoke with a non-UUID jti returns a clean 400 invalid_request (no raw DB error leak)", async () => {
+    // Self-contained principal (no dependence on earlier tests' signups).
+    const s = await fetchHandler(new Request("http://x/signup", {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ email: "revoke-badjti@example.com", name: "RB", password: "pw-pw-pw-pw" }),
+    }));
+    expect(s.status).toBe(201);
+    const session = (await s.json()).session as string;
+    const res = await fetchHandler(new Request("http://x/v1/auth/revoke", {
+      method: "POST", headers: { "content-type": "application/json", authorization: `Bearer ${session}` },
+      body: JSON.stringify({ jti: "not-a-uuid" }),
+    }));
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    expect(body.reason).toBe("invalid_request");
+    expect(body.error).toBe("jti must be a UUID.");
+    expect(JSON.stringify(body)).not.toContain("invalid input syntax");
+  });
+
+  test("a caller-requested 10-year TTL comes back clamped to 24h over HTTP", async () => {
+    const s = await fetchHandler(new Request("http://x/login", {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ email: "route@example.com", password: "pw-pw-pw-pw" }),
+    }));
+    const session = (await s.json()).session as string;
+    const tokenRes = await fetchHandler(new Request("http://x/v1/auth/token", {
+      method: "POST", headers: { "content-type": "application/json", authorization: `Bearer ${session}` },
+      body: JSON.stringify({ app: "tenants", ttlSeconds: 315360000 }),
+    }));
+    expect(tokenRes.status).toBe(200);
+    expect((await tokenRes.json()).expires_in).toBe(24 * 60 * 60);
+
+    const badRes = await fetchHandler(new Request("http://x/v1/auth/token", {
+      method: "POST", headers: { "content-type": "application/json", authorization: `Bearer ${session}` },
+      body: JSON.stringify({ app: "tenants", ttlSeconds: -1 }),
+    }));
+    expect(badRes.status).toBe(400);
+    expect((await badRes.json()).reason).toBe("invalid_ttl");
+  });
+
+  test("/v1/introspect is tenant-scoped: a foreign tenant's kid reads active:false", async () => {
+    const s = await fetchHandler(new Request("http://x/login", {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ email: "route@example.com", password: "pw-pw-pw-pw" }),
+    }));
+    const session = (await s.json()).session as string;
+    const tokenRes = await fetchHandler(new Request("http://x/v1/auth/token", {
+      method: "POST", headers: { "content-type": "application/json", authorization: `Bearer ${session}` },
+      body: JSON.stringify({ app: "tenants", scopes: ["tenants:read"] }),
+    }));
+    const tokenBody = await tokenRes.json();
+    const access = tokenBody.access_token as string;
+    const callerTid = tokenBody.tid as string;
+
+    // A key bound INSIDE the caller's tenant is visible…
+    fakeStore.bindings.set("kid-same-tenant", { tenant_id: callerTid, user_id: "u-same", principal_type: "user" });
+    const same = await fetchHandler(new Request("http://x/v1/introspect?kid=kid-same-tenant", { headers: { authorization: `Bearer ${access}` } }));
+    expect(same.status).toBe(200);
+    expect(await same.json()).toMatchObject({ active: true, tenant_id: callerTid, user_id: "u-same" });
+
+    // …a key bound to ANOTHER tenant fails closed (no binding leak).
+    fakeStore.bindings.set("kid-foreign-tenant", { tenant_id: newId(), user_id: "u-foreign", principal_type: "user" });
+    const foreign = await fetchHandler(new Request("http://x/v1/introspect?kid=kid-foreign-tenant", { headers: { authorization: `Bearer ${access}` } }));
+    expect(foreign.status).toBe(200);
+    const foreignBody = await foreign.json();
+    expect(foreignBody).toEqual({ active: false, kid: "kid-foreign-tenant" });
+    expect(foreignBody.user_id).toBeUndefined();
   });
 });

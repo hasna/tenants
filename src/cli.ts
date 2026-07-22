@@ -26,7 +26,8 @@ Commands:
   auth login  --email <e> [--password <pw>]        (no password -> OTP challenge)
   auth verify --email <e> --code <code>            (confirm signup / complete an OTP challenge)
   auth resend --email <e>                          (re-send an email confirmation code)
-  auth token  --session <s> --app <app> [--scope a --scope b] [--tenant <id>]
+  auth token  --session <s> --app <app> [--scope a --scope b] [--tenant <id>] [--ttl <seconds>]
+  auth revoke --session <s> --jti <jti>            (deny-list an issued token before its expiry)
   auth whoami --session <s>
   auth jwks
   auth introspect --kid <kid> --session <s>|--key <apiKey>
@@ -99,7 +100,8 @@ async function dispatchAuth(rest: string[], parsed: ParsedArgs, json: boolean): 
   auth login  --email <e> [--password <pw>]        (no password -> OTP challenge)
   auth verify --email <e> --code <code>            (confirm signup / complete an OTP challenge)
   auth resend --email <e>                          (re-send an email confirmation code)
-  auth token  --session <s> --app <app> [--scope a --scope b] [--tenant <id>]
+  auth token  --session <s> --app <app> [--scope a --scope b] [--tenant <id>] [--ttl <seconds>]
+  auth revoke --session <s> --jti <jti>            (deny-list an issued token before its expiry)
   auth whoami --session <s>
   auth jwks
   auth introspect --kid <kid> --session <s>|--key <apiKey>
@@ -146,7 +148,15 @@ Requires HASNA_TENANTS_API_URL. Session tokens are returned by verify/login (aft
     const scopes = flagValues(parsed, "scope");
     if (scopes.length > 0) body["scopes"] = scopes;
     if (flagValue(parsed, "tenant")) body["tenant_id"] = flagValue(parsed, "tenant");
+    // Server-bounded: values above the 24h ceiling are clamped by the API.
+    if (flagValue(parsed, "ttl")) body["ttlSeconds"] = Number(flagValue(parsed, "ttl"));
     output(await call("POST", "/v1/auth/token", body, session), true);
+    return;
+  }
+  if (subcommand === "revoke") {
+    const session = required(flagValue(parsed, "session"), "auth revoke requires --session");
+    const body = { jti: required(flagValue(parsed, "jti"), "auth revoke requires --jti") };
+    output(await call("POST", "/v1/auth/revoke", body, session), true);
     return;
   }
   if (subcommand === "whoami") {

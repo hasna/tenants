@@ -24,12 +24,16 @@ offline against that JWKS.
   domains, with an email-confirmation gate (OTP + one-click link) delivered via
   Amazon SES.
 - **Sessions & tokens** — password/OTP sessions, and per-app fleet access tokens
-  (EdDSA JWS) minted from a session, scoped by membership role.
+  (EdDSA JWS) minted from a session, scoped by membership role. Token TTL is
+  server-bounded (24h ceiling — callers can only shorten it), and every minted
+  `jti` is registered so a token can be revoked before its expiry
+  (`POST /v1/auth/revoke`; the serve layer checks the denylist on verify).
 - **JWKS** — a published `/.well-known/jwks.json` so every app verifies tokens
   offline. Keys are generated + persisted in the app's own Postgres (or injected
   via Secrets Manager).
 - **API-key bridge** — issued keys are bound to a tenant/user and introspectable
-  by `kid`.
+  by `kid`. Introspection is tenant-scoped: bindings outside the caller's own
+  tenant read as `active:false`.
 
 ## Surfaces
 
@@ -50,8 +54,9 @@ POST /login  | /v1/auth/login                   (public)
 POST /v1/auth/verify | /v1/auth/resend          (public)
 GET  /v1/auth/confirm                            (public, one-click)
 POST /v1/auth/token                              (Bearer session)
+POST /v1/auth/revoke                             (Bearer session, owner-scoped)
 GET  /v1/auth/whoami                             (Bearer session)
-GET  /v1/introspect?kid=…                        (API-key / access-token auth)
+GET  /v1/introspect?kid=…                        (API-key / access-token auth, tenant-scoped)
 ```
 
 ## Configuration (cloud mode)

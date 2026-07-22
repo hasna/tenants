@@ -11,11 +11,16 @@ export interface VerifyInput { "email": string; "code": string }
 
 export interface ResendInput { "email": string }
 
+/** ttlSeconds is server-bounded: values above the 24h ceiling are clamped; non-positive/non-integer values are rejected. */
 export interface TokenInput { "app": string; "scopes"?: Array<string>; "tenant_id"?: string; "ttlSeconds"?: number }
+
+export interface RevokeInput { "jti": string; "session"?: string }
+
+export interface RevokeResponse { "revoked": boolean; "jti": string }
 
 export interface AuthResponse { "session"?: string; "session_expires_in"?: number; "challenge"?: boolean; "purpose"?: string; "expires_in"?: number; "confirmation_required"?: boolean; "email_sent"?: boolean; "email_message_id"?: string; "principal"?: Record<string, unknown>; "tenants"?: Array<Record<string, unknown>>; "apps"?: Array<string> }
 
-export interface TokenResponse { "access_token"?: string; "token_type"?: string; "alg"?: string; "kid"?: string; "aud"?: string; "tid"?: string; "uid"?: string; "pt"?: string; "scope"?: Array<string>; "expires_in"?: number; "api_key"?: string }
+export interface TokenResponse { "access_token"?: string; "token_type"?: string; "alg"?: string; "kid"?: string; "aud"?: string; "tid"?: string; "uid"?: string; "pt"?: string; "scope"?: Array<string>; "expires_in"?: number; "jti"?: string; "api_key"?: string }
 
 export interface WhoamiResponse { "principal"?: Record<string, unknown>; "tenants"?: Array<Record<string, unknown>>; "apps"?: Array<string> }
 
@@ -113,12 +118,17 @@ export class TenantsClient {
     return this.request("POST", `/v1/auth/token`, { body, query: undefined, init });
   }
 
+  /** Revoke an issued access token by jti before its expiry (Bearer session; owner-scoped). */
+  async revokeToken(body: RevokeInput, init?: RequestInit): Promise<RevokeResponse> {
+    return this.request("POST", `/v1/auth/revoke`, { body, query: undefined, init });
+  }
+
   /** Resolve the session principal + tenant memberships. */
   async whoami(init?: RequestInit): Promise<WhoamiResponse> {
     return this.request("GET", `/v1/auth/whoami`, { body: undefined, query: undefined, init });
   }
 
-  /** Introspect an issued key by kid (tenant/user binding + status). */
+  /** Introspect an issued key by kid (tenant/user binding + status). Tenant-scoped: bindings outside the caller's tenant report active:false. */
   async introspect(query?: { "kid": string }, init?: RequestInit): Promise<IntrospectResponse> {
     return this.request("GET", `/v1/introspect`, { body: undefined, query, init });
   }
