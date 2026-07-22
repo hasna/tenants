@@ -29,6 +29,24 @@ export const TOKEN_ALG = "EdDSA";
 export const TOKEN_ISSUER = "identities";
 /** Default access-token TTL (24h) per standard §1.3 (v2 access tokens ≤24h). */
 export const DEFAULT_ACCESS_TOKEN_TTL_SECONDS = 24 * 60 * 60;
+/**
+ * Hard server-side ceiling on any caller-requested TTL (24h per standard §1.3).
+ * A caller may only SHORTEN a token's life, never extend it: requests above the
+ * ceiling are clamped so no one can mint an effectively irrevocable credential.
+ */
+export const MAX_ACCESS_TOKEN_TTL_SECONDS = DEFAULT_ACCESS_TOKEN_TTL_SECONDS;
+
+/**
+ * Validate + bound a caller-supplied TTL. Non-integer / non-positive values are
+ * rejected (throws); values above MAX_ACCESS_TOKEN_TTL_SECONDS are clamped.
+ */
+export function boundedTtlSeconds(ttlSeconds: number | undefined): number {
+  if (ttlSeconds === undefined) return DEFAULT_ACCESS_TOKEN_TTL_SECONDS;
+  if (!Number.isSafeInteger(ttlSeconds) || ttlSeconds <= 0) {
+    throw new Error(`ttlSeconds must be a positive integer (got ${String(ttlSeconds)}).`);
+  }
+  return Math.min(ttlSeconds, MAX_ACCESS_TOKEN_TTL_SECONDS);
+}
 
 export interface AccessTokenClaims {
   /** Issuer — the fixed fleet issuer string (see TOKEN_ISSUER). */
@@ -105,15 +123,19 @@ export interface SignAccessTokenInput {
   tid: string;
   pt: "user" | "service";
   scope: string[];
+  /**
+   * Requested lifetime. Validated + clamped by boundedTtlSeconds: must be a
+   * positive integer, and is capped at MAX_ACCESS_TOKEN_TTL_SECONDS.
+   */
   ttlSeconds?: number;
   jti: string;
   nowMs?: number;
 }
 
-/** Mint a signed EdDSA access token. */
+/** Mint a signed EdDSA access token. TTL is server-bounded (never caller-extended). */
 export function signAccessToken(key: SigningKey, input: SignAccessTokenInput): { token: string; claims: AccessTokenClaims } {
   const nowSec = Math.floor((input.nowMs ?? Date.now()) / 1000);
-  const ttl = input.ttlSeconds ?? DEFAULT_ACCESS_TOKEN_TTL_SECONDS;
+  const ttl = boundedTtlSeconds(input.ttlSeconds);
   const claims: AccessTokenClaims = {
     iss: TOKEN_ISSUER,
     aud: input.aud,
@@ -145,7 +167,15 @@ export interface VerifyAccessTokenOptions {
   nowMs?: number;
 }
 
-/** Fully verify an EdDSA access token: signature, issuer, audience, expiry. */
+/**
+ * Fully verify an EdDSA access token: signature, issuer, audience, expiry.
+ *
+ * NOTE: this is the STATELESS check (usable offline by any app holding the
+ * JWKS) — it cannot see revocations. The tenants service itself additionally
+ * consults the issued-token denylist (store.isAccessTokenRevoked / the
+ * /v1/auth/revoke surface) after this succeeds; other apps may call
+ * /v1/introspect for the same defense-in-depth.
+ */
 export function verifyAccessToken(token: string, options: VerifyAccessTokenOptions): VerifyAccessTokenResult {
   const parts = token.split(".");
   if (parts.length !== 3) return { ok: false, reason: "malformed" };

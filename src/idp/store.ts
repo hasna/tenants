@@ -12,6 +12,7 @@
 import { generateKeyPairSync } from "node:crypto";
 import type { TypedQueryClient } from "../generated/storage-kit/index.js";
 import {
+  ISSUED_ACCESS_TOKENS_TABLE,
   JWT_SIGNING_KEYS_TABLE,
   MEMBERSHIPS_TABLE,
   SERVICE_PRINCIPALS_TABLE,
@@ -105,6 +106,10 @@ export interface IdpStoreApi {
   bumpChallengeAttempts(id: string): Promise<void>;
   recordApiKeyBinding(apiKeysTable: string, input: { kid: string; tenantId: string; userId: string | null; principalType: "user" | "service" }): Promise<void>;
   lookupApiKeyBinding(apiKeysTable: string, kid: string): Promise<{ tenant_id: string | null; user_id: string | null; principal_type: string | null } | null>;
+  recordIssuedAccessToken(input: { jti: string; userId: string | null; tenantId: string | null; aud: string; expiresAt: Date }): Promise<void>;
+  /** Stamp revoked_at on the caller's OWN token. Returns false when no owned, un-revoked row matches. */
+  revokeIssuedAccessToken(jti: string, userId: string): Promise<boolean>;
+  isAccessTokenRevoked(jti: string): Promise<boolean>;
 }
 
 export class IdpStore implements IdpStoreApi {
@@ -410,5 +415,37 @@ export class IdpStore implements IdpStoreApi {
       `SELECT tenant_id, user_id, principal_type FROM ${apiKeysTable} WHERE kid = $1`,
       [kid],
     );
+  }
+
+  // ── Issued access tokens (revocation registry) ──────────────────────────
+
+  /** Record a minted EdDSA token's jti so it can be revoked before exp. */
+  async recordIssuedAccessToken(input: { jti: string; userId: string | null; tenantId: string | null; aud: string; expiresAt: Date }): Promise<void> {
+    await this.client.execute(
+      `INSERT INTO ${ISSUED_ACCESS_TOKENS_TABLE} (jti, user_id, tenant_id, aud, expires_at)
+         VALUES ($1, $2, $3, $4, $5)
+       ON CONFLICT (jti) DO NOTHING`,
+      [input.jti, input.userId, input.tenantId, input.aud, input.expiresAt.toISOString()],
+    );
+  }
+
+  /** Revoke a token the caller OWNS (fail-closed: someone else's jti is untouched). */
+  async revokeIssuedAccessToken(jti: string, userId: string): Promise<boolean> {
+    const row = await this.client.get<{ jti: string }>(
+      `UPDATE ${ISSUED_ACCESS_TOKENS_TABLE} SET revoked_at = now()
+         WHERE jti = $1 AND user_id = $2 AND revoked_at IS NULL
+       RETURNING jti`,
+      [jti, userId],
+    );
+    return row !== null;
+  }
+
+  /** Denylist check consulted on every verify of a tenants-audience token. */
+  async isAccessTokenRevoked(jti: string): Promise<boolean> {
+    const row = await this.client.get<{ jti: string }>(
+      `SELECT jti FROM ${ISSUED_ACCESS_TOKENS_TABLE} WHERE jti = $1 AND revoked_at IS NOT NULL`,
+      [jti],
+    );
+    return row !== null;
   }
 }

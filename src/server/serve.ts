@@ -6,9 +6,9 @@
 //   GET  /version                   { status, version, mode }
 //   GET  /openapi.json              the OpenAPI document backing the generated SDK
 //   POST /signup|/login             public login front door (aliases of /v1/auth/*)
-//   /v1/auth/*                      public IdP: signup/login/verify/confirm/resend/token/whoami
+//   /v1/auth/*                      public IdP: signup/login/verify/confirm/resend/token/revoke/whoami
 //   GET  /jwks, /v1/.well-known/... public JWKS (EdDSA) for offline token verification
-//   GET  /v1/introspect            API-key-authenticated tenant/user binding lookup
+//   GET  /v1/introspect            authenticated, TENANT-SCOPED tenant/user binding lookup
 //
 // Auth uses the canonical @hasna/contracts API-key kit (verifyApiKey) plus the
 // service's own EdDSA access tokens (verified via JWKS), so the serve process is
@@ -98,7 +98,15 @@ class HttpError extends Error {
   }
 }
 
-async function authenticate(h: Handler, req: Request, requiredScopes: string[]): Promise<Response | null> {
+/** The authenticated caller, as derived server-side from their credential. */
+interface CallerContext {
+  /** Tenant the caller's credential is bound to (null when unresolvable). */
+  tenantId: string | null;
+}
+
+type AuthOutcome = { failure: Response; caller?: never } | { failure?: never; caller: CallerContext };
+
+async function authenticate(h: Handler, req: Request, requiredScopes: string[]): Promise<AuthOutcome> {
   const url = new URL(req.url);
 
   // v2 (end state): a tenants-signed EdDSA access token verified via JWKS.
@@ -106,11 +114,16 @@ async function authenticate(h: Handler, req: Request, requiredScopes: string[]):
   if (raw && looksLikeAccessToken(raw)) {
     const jwks = await h.getJwks();
     const result = verifyAccessToken(raw, { jwks, expectedAudience: TENANTS_SERVE_APP });
-    if (!result.ok) return json({ error: `access token ${result.reason}`, reason: result.reason }, 401);
-    if (requiredScopes.length > 0 && !hasAllScopes(result.claims.scope ?? [], requiredScopes)) {
-      return json({ error: "insufficient_scope", reason: "insufficient_scope" }, 403);
+    if (!result.ok) return { failure: json({ error: `access token ${result.reason}`, reason: result.reason }, 401) };
+    // Revocation denylist: a signature-valid, unexpired token that was revoked
+    // (POST /v1/auth/revoke) must be refused — exp alone is not the boundary.
+    if (result.claims.jti && (await h.auth.isTokenRevoked(result.claims.jti))) {
+      return { failure: json({ error: "access token revoked", reason: "revoked" }, 401) };
     }
-    return null;
+    if (requiredScopes.length > 0 && !hasAllScopes(result.claims.scope ?? [], requiredScopes)) {
+      return { failure: json({ error: "insufficient_scope", reason: "insufficient_scope" }, 403) };
+    }
+    return { caller: { tenantId: result.claims.tid ?? null } };
   }
 
   // v1 (transition): the LOCKED @hasna/contracts per-app HMAC token.
@@ -119,8 +132,11 @@ async function authenticate(h: Handler, req: Request, requiredScopes: string[]):
     path: url.pathname,
     requiredScopes,
   });
-  if (decision.ok) return null;
-  return json({ error: decision.message, reason: decision.reason }, decision.status);
+  if (decision.ok) {
+    // Tenant context comes from the key's recorded binding (api_keys bridge).
+    return { caller: { tenantId: await h.auth.tenantForApiKey(decision.principal.kid) } };
+  }
+  return { failure: json({ error: decision.message, reason: decision.reason }, decision.status) };
 }
 
 /** Authenticated tenant-admin surface (currently: key introspection). */
@@ -130,14 +146,15 @@ async function handleV1(h: Handler, req: Request, url: URL): Promise<Response> {
   const resource = segments[1];
 
   const scope = method === "GET" ? "tenants:read" : "tenants:write";
-  const authFailure = await authenticate(h, req, [scope]);
-  if (authFailure) return authFailure;
+  const outcome = await authenticate(h, req, [scope]);
+  if (outcome.failure) return outcome.failure;
 
   try {
     if (resource === "introspect" && segments.length === 2 && method === "GET") {
       const kid = url.searchParams.get("kid");
       if (!kid) throw new HttpError(400, "kid query parameter is required", "invalid_request");
-      return json(await h.auth.introspect(kid));
+      // Tenant-scoped: the binding is only revealed inside the caller's tenant.
+      return json(await h.auth.introspect(kid, outcome.caller.tenantId));
     }
     throw new HttpError(404, `No route for ${method} ${url.pathname}`, "not_found");
   } catch (error) {
@@ -206,6 +223,11 @@ async function handleAuth(h: Handler, req: Request, url: URL): Promise<Response 
     if (method === "POST" && path === "/v1/auth/token") {
       const body = await readJsonBody(req);
       return json(await h.auth.token({ ...body, sessionToken: sessionTokenFrom(req, body) }));
+    }
+    // Revoke an issued access token by jti (owner-scoped, session-authenticated).
+    if (method === "POST" && path === "/v1/auth/revoke") {
+      const body = await readJsonBody(req);
+      return json(await h.auth.revokeToken({ jti: body.jti, sessionToken: sessionTokenFrom(req, body) }));
     }
     if (method === "GET" && path === "/v1/auth/whoami") {
       return json(await h.auth.whoami(sessionTokenFrom(req, null)));

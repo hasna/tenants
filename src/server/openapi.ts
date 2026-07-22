@@ -4,6 +4,8 @@
 // confirm / resend / token / whoami / JWKS / introspect. (The agent-identity CRUD
 // surface lives in the separate @hasna/identities package and is NOT here.)
 
+import { MAX_ACCESS_TOKEN_TTL_SECONDS } from "../idp/tokens.js";
+
 export function buildOpenApiDocument(version: string) {
   return {
     openapi: "3.1.0",
@@ -59,9 +61,25 @@ export function buildOpenApiDocument(version: string) {
             app: { type: "string" },
             scopes: { type: "array", items: { type: "string" } },
             tenant_id: { type: "string" },
-            ttlSeconds: { type: "integer" },
+            ttlSeconds: {
+              type: "integer",
+              minimum: 1,
+              maximum: MAX_ACCESS_TOKEN_TTL_SECONDS,
+              description:
+                `Requested token lifetime in seconds. Server-bounded: values above the ceiling (${MAX_ACCESS_TOKEN_TTL_SECONDS}s = 24h) are clamped; non-positive/non-integer values are rejected (invalid_ttl).`,
+            },
           },
           required: ["app"],
+        },
+        RevokeInput: {
+          type: "object",
+          properties: { jti: { type: "string" }, session: { type: "string" } },
+          required: ["jti"],
+        },
+        RevokeResponse: {
+          type: "object",
+          properties: { revoked: { type: "boolean" }, jti: { type: "string" } },
+          required: ["revoked", "jti"],
         },
         AuthResponse: {
           type: "object",
@@ -94,6 +112,7 @@ export function buildOpenApiDocument(version: string) {
             pt: { type: "string" },
             scope: { type: "array", items: { type: "string" } },
             expires_in: { type: "integer" },
+            jti: { type: "string", description: "Token id — pass to POST /v1/auth/revoke to deny-list the token before exp." },
             api_key: { type: "string" },
           },
         },
@@ -192,6 +211,15 @@ export function buildOpenApiDocument(version: string) {
           responses: jsonResponse("TokenResponse"),
         },
       },
+      "/v1/auth/revoke": {
+        post: {
+          operationId: "revokeToken",
+          summary:
+            "Revoke an issued access token by jti before its expiry (Bearer session; owner-scoped)",
+          requestBody: jsonBody("RevokeInput"),
+          responses: jsonResponse("RevokeResponse"),
+        },
+      },
       "/v1/auth/whoami": {
         get: {
           operationId: "whoami",
@@ -202,7 +230,8 @@ export function buildOpenApiDocument(version: string) {
       "/v1/introspect": {
         get: {
           operationId: "introspect",
-          summary: "Introspect an issued key by kid (tenant/user binding + status)",
+          summary:
+            "Introspect an issued key by kid (tenant/user binding + status). Tenant-scoped: bindings outside the caller's own tenant report active:false.",
           parameters: [{ name: "kid", in: "query", required: true, schema: { type: "string" } }],
           responses: jsonResponse("IntrospectResponse"),
         },

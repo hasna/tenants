@@ -12,7 +12,7 @@ import { randomBytes } from "node:crypto";
 import type { IdpStoreApi, MembershipRow, UserRow } from "./store.js";
 import { hashPassword, sha256, verifyPassword } from "./passwords.js";
 import { newId, ROOT_TENANT_ID } from "./ids.js";
-import { buildJwks, signAccessToken, type JwksDocument } from "./tokens.js";
+import { buildJwks, signAccessToken, MAX_ACCESS_TOKEN_TTL_SECONDS, type JwksDocument } from "./tokens.js";
 import { isEmailDomainAllowed, type EmailPolicy } from "./policy.js";
 import { NoopMailer, type Mailer } from "./mailer.js";
 
@@ -314,12 +314,26 @@ export class AuthService {
       scope = granted;
     }
 
+    // TTL is caller-shrinkable but server-bounded: invalid values are rejected
+    // here (400) and signAccessToken clamps anything above the 24h ceiling so a
+    // caller can never mint an effectively irrevocable long-lived credential.
+    if (input.ttlSeconds !== undefined && (!Number.isSafeInteger(input.ttlSeconds) || input.ttlSeconds <= 0)) {
+      throw new AuthError(400, "ttlSeconds must be a positive integer.", "invalid_ttl", {
+        max_ttl_seconds: MAX_ACCESS_TOKEN_TTL_SECONDS,
+      });
+    }
+
     const jti = newId();
     const signingKey = await this.store.getSigningKeyForMinting();
     const { token, claims } = signAccessToken(signingKey, {
       aud: app, sub: user.id, tid: membership.tenant_id, pt: "user", scope,
-      ...(input.ttlSeconds ? { ttlSeconds: input.ttlSeconds } : {}),
+      ...(input.ttlSeconds !== undefined ? { ttlSeconds: input.ttlSeconds } : {}),
       jti, nowMs: this.now(),
+    });
+    // Register the jti so the token is revocable before exp (denylist on verify).
+    await this.store.recordIssuedAccessToken({
+      jti, userId: user.id, tenantId: membership.tenant_id, aud: app,
+      expiresAt: new Date(claims.exp * 1000),
     });
 
     const response: Record<string, unknown> = {
@@ -333,6 +347,8 @@ export class AuthService {
       pt: "user",
       scope,
       expires_in: claims.exp - claims.iat,
+      // Token id — pass to POST /v1/auth/revoke to deny-list this token early.
+      jti,
     };
 
     // Transitional: also mint a long-lived v1 HMAC key for this service's own
@@ -352,6 +368,27 @@ export class AuthService {
     return response;
   }
 
+  // ── revoke (deny-list an issued access token before exp) ────────────────────
+
+  /**
+   * Revoke a previously minted EdDSA access token by jti. Owner-scoped: the
+   * session principal may only revoke tokens minted for THEIR user id (a jti
+   * belonging to someone else — or an unknown jti — returns revoked:false
+   * without leaking whether it exists).
+   */
+  async revokeToken(input: { sessionToken: string; jti?: string }): Promise<Record<string, unknown>> {
+    const { user } = await this.resolveSession(input.sessionToken);
+    const jti = (input.jti ?? "").trim();
+    if (!jti) throw new AuthError(400, "jti is required.", "invalid_request");
+    const revoked = await this.store.revokeIssuedAccessToken(jti, user.id);
+    return { revoked, jti };
+  }
+
+  /** Denylist check used by the serve layer after stateless verification. */
+  async isTokenRevoked(jti: string): Promise<boolean> {
+    return this.store.isAccessTokenRevoked(jti);
+  }
+
   // ── whoami ───────────────────────────────────────────────────────────────────
 
   async whoami(sessionToken: string): Promise<Record<string, unknown>> {
@@ -365,15 +402,30 @@ export class AuthService {
 
   // ── introspect (bridge/status) ───────────────────────────────────────────────
 
-  async introspect(kid: string): Promise<Record<string, unknown>> {
+  /**
+   * Resolve a kid's tenant/user binding — TENANT-SCOPED. The caller's own
+   * tenant (derived server-side from their credential, never the request) must
+   * match the binding's tenant; anything else (foreign tenant, unknown kid,
+   * unbound key, or an unresolvable caller tenant) fails closed as
+   * `active:false` so cross-tenant kid probing leaks nothing.
+   */
+  async introspect(kid: string, callerTenantId: string | null): Promise<Record<string, unknown>> {
     const binding = await this.store.lookupApiKeyBinding(this.apiKeysTable, kid);
-    if (!binding) return { active: false, kid };
+    if (!binding || !callerTenantId || binding.tenant_id !== callerTenantId) {
+      return { active: false, kid };
+    }
     return {
       active: true, kid,
       tenant_id: binding.tenant_id,
       user_id: binding.user_id,
       principal_type: binding.principal_type,
     };
+  }
+
+  /** Resolve the tenant a v1 API key (kid) is bound to — serve-layer caller context. */
+  async tenantForApiKey(kid: string): Promise<string | null> {
+    const binding = await this.store.lookupApiKeyBinding(this.apiKeysTable, kid);
+    return binding?.tenant_id ?? null;
   }
 
   // ── internals ────────────────────────────────────────────────────────────────
