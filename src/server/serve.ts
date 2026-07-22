@@ -117,7 +117,13 @@ async function authenticate(h: Handler, req: Request, requiredScopes: string[]):
     if (!result.ok) return { failure: json({ error: `access token ${result.reason}`, reason: result.reason }, 401) };
     // Revocation denylist: a signature-valid, unexpired token that was revoked
     // (POST /v1/auth/revoke) must be refused — exp alone is not the boundary.
-    if (result.claims.jti && (await h.auth.isTokenRevoked(result.claims.jti))) {
+    // FAIL CLOSED on a missing jti: a token without one can never be checked
+    // against the denylist, so it is rejected outright rather than skipped.
+    const jti = typeof result.claims.jti === "string" ? result.claims.jti.trim() : "";
+    if (!jti) {
+      return { failure: json({ error: "access token missing jti", reason: "missing_jti" }, 401) };
+    }
+    if (await h.auth.isTokenRevoked(jti)) {
       return { failure: json({ error: "access token revoked", reason: "revoked" }, 401) };
     }
     if (requiredScopes.length > 0 && !hasAllScopes(result.claims.scope ?? [], requiredScopes)) {

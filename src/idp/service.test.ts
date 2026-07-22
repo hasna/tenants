@@ -240,6 +240,23 @@ describe("AuthService", () => {
     expect(await svc.isTokenRevoked(String(minted.jti))).toBe(false);
   });
 
+  test("revoke rejects a non-UUID jti with a clean 400 invalid_request (guard fires before the store)", async () => {
+    const store = new FakeIdpStore();
+    const svc = service(store);
+    const s = await svc.signup({ email: "badjti@example.com", name: "B", password: "pw-pw-pw-pw" });
+    for (const bad of ["not-a-uuid", "1234", "'; DROP TABLE x; --", "aaaaaaaa-bbbb-cccc-dddd"]) {
+      const err = await svc.revokeToken({ sessionToken: String(s.session), jti: bad }).then(
+        () => { throw new Error(`revokeToken must reject non-UUID jti ${JSON.stringify(bad)}`); },
+        (e) => e,
+      );
+      // A typed AuthError — the HTTP layer maps it to 400 invalid_request —
+      // NOT a raw Postgres "invalid input syntax for type uuid" leak.
+      expect(err).toBeInstanceOf(AuthError);
+      expect((err as AuthError).status).toBe(400);
+      expect((err as AuthError).code).toBe("invalid_request");
+    }
+  });
+
   test("introspect is tenant-scoped: foreign or unresolvable callers see active:false", async () => {
     const store = new FakeIdpStore();
     const svc = service(store);

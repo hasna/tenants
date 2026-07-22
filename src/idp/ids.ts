@@ -62,3 +62,14 @@ export const SEED_TENANTS: SeedTenant[] = [
 export function newId(): string {
   return randomUUID();
 }
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * RFC 4122 shape check. Guards caller-supplied ids (e.g. a revoke request's
+ * jti) before they reach a Postgres `uuid` column, so malformed input becomes
+ * a clean 400 instead of a raw "invalid input syntax for type uuid" error.
+ */
+export function isUuid(value: string): boolean {
+  return UUID_RE.test(value);
+}

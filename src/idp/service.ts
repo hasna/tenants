@@ -11,7 +11,7 @@ import { mintApiKey, hasScope, type ApiKeyStore } from "@hasna/contracts/auth";
 import { randomBytes } from "node:crypto";
 import type { IdpStoreApi, MembershipRow, UserRow } from "./store.js";
 import { hashPassword, sha256, verifyPassword } from "./passwords.js";
-import { newId, ROOT_TENANT_ID } from "./ids.js";
+import { isUuid, newId, ROOT_TENANT_ID } from "./ids.js";
 import { buildJwks, signAccessToken, MAX_ACCESS_TOKEN_TTL_SECONDS, type JwksDocument } from "./tokens.js";
 import { isEmailDomainAllowed, type EmailPolicy } from "./policy.js";
 import { NoopMailer, type Mailer } from "./mailer.js";
@@ -380,6 +380,10 @@ export class AuthService {
     const { user } = await this.resolveSession(input.sessionToken);
     const jti = (input.jti ?? "").trim();
     if (!jti) throw new AuthError(400, "jti is required.", "invalid_request");
+    // Minted jtis are UUIDs (newId) and the registry column is `uuid` — reject
+    // any other shape here so it surfaces as a clean 400, not a raw Postgres
+    // "invalid input syntax for type uuid" through the generic catch.
+    if (!isUuid(jti)) throw new AuthError(400, "jti must be a UUID.", "invalid_request");
     const revoked = await this.store.revokeIssuedAccessToken(jti, user.id);
     return { revoked, jti };
   }
