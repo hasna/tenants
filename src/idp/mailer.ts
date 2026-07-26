@@ -1,9 +1,14 @@
 // Confirmation-email sender for the IdP login front door.
 //
 // Sends the signup confirmation via Amazon SES (SESv2 SendEmail) using a
-// DKIM-verified sender identity (default `auth@tenants.hasna.xyz`). It calls SES
-// DIRECTLY (SigV4 over HTTPS) — no dependency on the `emails` app and no AWS SDK
+// DKIM-verified sender identity supplied by the operator. It calls SES DIRECTLY
+// (SigV4 over HTTPS) — no dependency on a separate mail service and no AWS SDK
 // in the bundle.
+//
+// Sender identity and confirmation base URL are CONFIGURATION, never defaults
+// baked into the package: `HASNA_TENANTS_MAIL_FROM` and
+// `HASNA_TENANTS_CONFIRM_URL_BASE` are required whenever email is enabled, and
+// startup fails with a clear error naming the missing variable.
 //
 // A cross-account send is supported by passing `FromEmailAddressIdentityArn`
 // (HASNA_TENANTS_SES_FROM_ARN) so SES attributes the mail to the authorizing
@@ -18,8 +23,11 @@ import { createHash, createHmac } from "node:crypto";
 export interface ConfirmationEmail {
   to: string;
   code: string;
-  /** Fully-formed confirmation link (GET) for one-click confirm. */
-  link: string;
+  /**
+   * Fully-formed confirmation link (GET) for one-click confirm. Absent when no
+   * public base URL is configured — the mail then carries the code only.
+   */
+  link?: string;
   /** Minutes until the code/link expires (for the copy). */
   expiresMinutes: number;
   /** Why the code was issued (drives the subject/copy). Default `signup`. */
@@ -51,7 +59,7 @@ interface AwsCredentials {
 
 export interface SesMailerOptions {
   region: string;
-  /** Envelope From, e.g. `Hasna Tenants <auth@tenants.hasna.xyz>`. */
+  /** Envelope From, e.g. `Example Auth <auth@auth.example.com>`. */
   from: string;
   /** Cross-account identity ARN authorizing this sender. */
   fromArn?: string;
@@ -101,7 +109,7 @@ export class SesMailer implements Mailer {
     const endpoint = `https://${host}${path}`;
 
     const login = input.purpose === "login";
-    const subject = login ? "Your Hasna login code" : "Confirm your Hasna account";
+    const subject = login ? "Your login code" : "Confirm your account";
     const bodyObj: Record<string, unknown> = {
       FromEmailAddress: this.options.from,
       Destination: { ToAddresses: [input.to] },
@@ -176,11 +184,10 @@ export class SesMailer implements Mailer {
 function confirmationText(i: ConfirmationEmail): string {
   const login = i.purpose === "login";
   return [
-    login ? "Here is your Hasna login code." : "Welcome to Hasna.",
+    login ? "Here is your login code." : "Welcome — confirm your account.",
     "",
     `Your ${login ? "login" : "confirmation"} code is: ${i.code}`,
-    "",
-    `Or ${login ? "sign in" : "confirm"} in one click: ${i.link}`,
+    ...(i.link ? ["", `Or ${login ? "sign in" : "confirm"} in one click: ${i.link}`] : []),
     "",
     `This code expires in ${i.expiresMinutes} minutes. If you did not request this, ignore this email.`,
   ].join("\n");
@@ -188,14 +195,18 @@ function confirmationText(i: ConfirmationEmail): string {
 
 function confirmationHtml(i: ConfirmationEmail): string {
   const login = i.purpose === "login";
-  const safeLink = i.link.replace(/"/g, "&quot;");
+  const safeLink = i.link?.replace(/"/g, "&quot;");
   return [
     `<div style="font-family:system-ui,Segoe UI,Roboto,sans-serif;max-width:480px;margin:0 auto">`,
-    `<h2>${login ? "Your Hasna login code" : "Welcome to Hasna"}</h2>`,
+    `<h2>${login ? "Your login code" : "Confirm your account"}</h2>`,
     `<p>Your ${login ? "login" : "confirmation"} code is:</p>`,
     `<p style="font-size:28px;font-weight:700;letter-spacing:4px">${i.code}</p>`,
-    `<p>Or ${login ? "sign in" : "confirm"} in one click:</p>`,
-    `<p><a href="${safeLink}" style="background:#111;color:#fff;padding:10px 18px;border-radius:8px;text-decoration:none">${login ? "Sign in" : "Confirm my account"}</a></p>`,
+    ...(safeLink
+      ? [
+          `<p>Or ${login ? "sign in" : "confirm"} in one click:</p>`,
+          `<p><a href="${safeLink}" style="background:#111;color:#fff;padding:10px 18px;border-radius:8px;text-decoration:none">${login ? "Sign in" : "Confirm my account"}</a></p>`,
+        ]
+      : []),
     `<p style="color:#666;font-size:13px">This code expires in ${i.expiresMinutes} minutes. If you did not request this, ignore this email.</p>`,
     `</div>`,
   ].join("");
@@ -207,23 +218,55 @@ export const SES_REGION_ENV = "HASNA_TENANTS_SES_REGION";
 export const SES_FROM_ARN_ENV = "HASNA_TENANTS_SES_FROM_ARN";
 export const CONFIRM_URL_BASE_ENV = "HASNA_TENANTS_CONFIRM_URL_BASE";
 
-export const DEFAULT_MAIL_FROM = "Hasna Tenants <auth@tenants.hasna.xyz>";
-export const DEFAULT_CONFIRM_URL_BASE = "https://tenants.hasna.xyz";
-
-/** The public base URL used to build one-click confirmation links. */
-export function confirmUrlBaseFromEnv(env: NodeJS.ProcessEnv = process.env): string {
-  return (env[CONFIRM_URL_BASE_ENV] ?? DEFAULT_CONFIRM_URL_BASE).replace(/\/+$/, "");
+/**
+ * The public base URL used to build one-click confirmation links, e.g.
+ * `https://auth.example.com`. There is NO built-in default — a package-level
+ * default would hardcode one deployment's hostname into every install — so this
+ * returns `undefined` when unset and the caller decides whether that is fatal.
+ */
+export function confirmUrlBaseFromEnv(env: NodeJS.ProcessEnv = process.env): string | undefined {
+  const base = (env[CONFIRM_URL_BASE_ENV] ?? "").trim().replace(/\/+$/, "");
+  return base || undefined;
 }
 
 /**
  * Build a mailer from the environment. Returns a NoopMailer unless
  * `HASNA_TENANTS_EMAIL_ENABLED=1`, so email stays inert in local/dev until
  * explicitly turned on in the deployed service.
+ *
+ * When email IS enabled the sender identity is required: there is no default
+ * From address, and starting without one fails loudly rather than sending from
+ * some other deployment's domain.
  */
 export function createMailerFromEnv(env: NodeJS.ProcessEnv = process.env): Mailer {
   if (env[MAIL_ENABLED_ENV] !== "1") return new NoopMailer();
   const region = env[SES_REGION_ENV] || env["AWS_REGION"] || "us-east-1";
-  const from = env[MAIL_FROM_ENV] || DEFAULT_MAIL_FROM;
+  const from = (env[MAIL_FROM_ENV] ?? "").trim();
+  if (!from) {
+    throw new Error(
+      `${MAIL_FROM_ENV} is required when ${MAIL_ENABLED_ENV}=1. Set it to a DKIM-verified ` +
+        `SES sender identity, e.g. "Example Auth <auth@auth.example.com>".`,
+    );
+  }
   const fromArn = env[SES_FROM_ARN_ENV];
   return new SesMailer({ region, from, ...(fromArn ? { fromArn } : {}) });
+}
+
+/**
+ * Resolve the full email-delivery configuration in one place, so every required
+ * variable is validated at STARTUP instead of failing mid-request. Both the
+ * sender identity and the confirmation base URL are mandatory once email is on.
+ */
+export function resolveEmailDeliveryFromEnv(
+  env: NodeJS.ProcessEnv = process.env,
+): { mailer: Mailer; confirmUrlBase?: string } {
+  const mailer = createMailerFromEnv(env);
+  const confirmUrlBase = confirmUrlBaseFromEnv(env);
+  if (env[MAIL_ENABLED_ENV] === "1" && !confirmUrlBase) {
+    throw new Error(
+      `${CONFIRM_URL_BASE_ENV} is required when ${MAIL_ENABLED_ENV}=1. Set it to this ` +
+        `deployment's public base URL, e.g. "https://auth.example.com".`,
+    );
+  }
+  return { mailer, ...(confirmUrlBase ? { confirmUrlBase } : {}) };
 }

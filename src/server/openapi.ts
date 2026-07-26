@@ -158,7 +158,7 @@ export function buildOpenApiDocument(version: string) {
       "/v1/auth/signup": {
         post: {
           operationId: "signup",
-          summary: "Create a tenant/user (hasna emails only) and send an email confirmation code",
+          summary: "Create a tenant/user (allowlisted email domains only) and send an email confirmation code",
           security: [],
           requestBody: jsonBody("SignupInput"),
           responses: jsonResponse("AuthResponse", "201"),

@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { generateKeyPairSync } from "node:crypto";
 import { AuthService, AuthError } from "./service.js";
+import { UNRESTRICTED_EMAIL_POLICY } from "./policy.js";
 import type { IdpStoreApi, MembershipRow, SessionRow, TenantRow, UserRow } from "./store.js";
 import { signingKeyFromPrivateJwk, verifyAccessToken, type JwkPublic, type SigningKey } from "./tokens.js";
 import { ROOT_TENANT_ID } from "./ids.js";
@@ -19,7 +20,7 @@ class FakeIdpStore implements IdpStoreApi {
   constructor() {
     const { privateKey } = generateKeyPairSync("ed25519");
     this.key = signingKeyFromPrivateJwk("test-kid", privateKey.export({ format: "jwk" }) as Record<string, unknown>);
-    this.tenants.set(ROOT_TENANT_ID, { id: ROOT_TENANT_ID, slug: "hasna", name: "Hasna", kind: "root", parent_id: null, status: "active", identity_id: null });
+    this.tenants.set(ROOT_TENANT_ID, { id: ROOT_TENANT_ID, slug: "root", name: "Root", kind: "root", parent_id: null, status: "active", identity_id: null });
   }
 
   async listPublicJwks(): Promise<JwkPublic[]> { return [this.key.publicJwk]; }
@@ -85,7 +86,10 @@ class FakeIdpStore implements IdpStoreApi {
 }
 
 function service(store: FakeIdpStore, otpEcho = false) {
-  return new AuthService({ store, signingSecret: "test-secret", apiKeysTable: "api_keys", otpEcho });
+  // No front-door gate: this helper exercises the non-policy paths. The
+  // unrestricted policy must be passed EXPLICITLY — the constructor default
+  // denies every address.
+  return new AuthService({ store, signingSecret: "test-secret", apiKeysTable: "api_keys", otpEcho, emailPolicy: UNRESTRICTED_EMAIL_POLICY });
 }
 
 class CaptureMailer {
@@ -96,11 +100,11 @@ class CaptureMailer {
   }
 }
 
-// A production-shaped service: hasna-only allowlist + confirmation gate + mailer.
+// A production-shaped service: configured allowlist + confirmation gate + mailer.
 function gatedService(store: FakeIdpStore, mailer: CaptureMailer) {
   return new AuthService({
     store, signingSecret: "test-secret", apiKeysTable: "api_keys", otpEcho: true,
-    emailPolicy: { allowedDomains: new Set(["hasna.xyz", "hasna.studio", "hasna.com"]), requireConfirmation: true },
+    emailPolicy: { allowedDomains: new Set(["example.com", "example.net", "example.org"]), requireConfirmation: true },
     mailer: mailer as any,
   });
 }
@@ -275,47 +279,107 @@ describe("AuthService", () => {
 });
 
 describe("AuthService login front door (allowlist + confirmation)", () => {
-  test("signup with a non-hasna email is rejected", async () => {
+  test("signup with an off-allowlist email is rejected", async () => {
     const store = new FakeIdpStore();
     const svc = gatedService(store, new CaptureMailer());
-    await expect(svc.signup({ email: "intruder@gmail.com", name: "X", password: "pw-pw-pw-pw" }))
-      .rejects.toThrow("restricted to Hasna email");
+    await expect(svc.signup({ email: "intruder@notallowed.test", name: "X", password: "pw-pw-pw-pw" }))
+      .rejects.toThrow("not permitted to sign up or sign in");
   });
 
-  test("login with a non-hasna email is rejected", async () => {
+  test("login with an off-allowlist email is rejected", async () => {
     const store = new FakeIdpStore();
     const svc = gatedService(store, new CaptureMailer());
-    await expect(svc.login({ email: "intruder@gmail.com", password: "pw-pw-pw-pw" }))
-      .rejects.toThrow("restricted to Hasna email");
+    await expect(svc.login({ email: "intruder@notallowed.test", password: "pw-pw-pw-pw" }))
+      .rejects.toThrow("not permitted to sign up or sign in");
   });
 
-  test("hasna signup does NOT mint a session; it sends a confirmation code", async () => {
+  test("allowlisted signup does NOT mint a session; it sends a confirmation code", async () => {
     const store = new FakeIdpStore();
     const mailer = new CaptureMailer();
     const svc = gatedService(store, mailer);
-    const res = await svc.signup({ email: "founder@hasna.xyz", name: "F", password: "pw-pw-pw-pw" });
+    const res = await svc.signup({ email: "founder@example.com", name: "F", password: "pw-pw-pw-pw" });
     expect(res.session).toBeUndefined();
     expect(res.confirmation_required).toBe(true);
     expect(res.challenge).toBe(true);
     expect(res.email_message_id).toBe("msg-1");
-    expect(mailer.sent[0]!.to).toBe("founder@hasna.xyz");
+    expect(mailer.sent[0]!.to).toBe("founder@example.com");
   });
 
   test("password login before confirmation is refused", async () => {
     const store = new FakeIdpStore();
     const svc = gatedService(store, new CaptureMailer());
-    await svc.signup({ email: "dev@hasna.studio", name: "D", password: "pw-pw-pw-pw" });
-    await expect(svc.login({ email: "dev@hasna.studio", password: "pw-pw-pw-pw" }))
+    await svc.signup({ email: "dev@example.net", name: "D", password: "pw-pw-pw-pw" });
+    await expect(svc.login({ email: "dev@example.net", password: "pw-pw-pw-pw" }))
       .rejects.toThrow("Confirm your email");
   });
 
   test("signup → confirm → password login succeeds", async () => {
     const store = new FakeIdpStore();
     const svc = gatedService(store, new CaptureMailer());
-    const signup = await svc.signup({ email: "dev2@hasna.com", name: "D2", password: "pw-pw-pw-pw" });
-    const verified = await svc.verify({ email: "dev2@hasna.com", code: String(signup.dev_code) });
+    const signup = await svc.signup({ email: "dev2@example.org", name: "D2", password: "pw-pw-pw-pw" });
+    const verified = await svc.verify({ email: "dev2@example.org", code: String(signup.dev_code) });
     expect(verified.session).toBeTruthy();
-    const ok = await svc.login({ email: "dev2@hasna.com", password: "pw-pw-pw-pw" });
+    const ok = await svc.login({ email: "dev2@example.org", password: "pw-pw-pw-pw" });
     expect(ok.session).toBeTruthy();
+  });
+});
+
+// Every session-minting path is gated, not only the entry points.
+describe("front door is re-checked before a session is minted", () => {
+  test("a pending challenge is not redeemable after its domain leaves the allowlist", async () => {
+    const store = new FakeIdpStore();
+    const allowed = new Set(["example.com"]);
+    const svc = new AuthService({
+      store, signingSecret: "test-secret", apiKeysTable: "api_keys", otpEcho: true,
+      emailPolicy: { allowedDomains: allowed, requireConfirmation: true },
+    });
+    const signup = await svc.signup({ email: "late@example.com", name: "L", password: "pw-pw-pw-pw" });
+    expect(signup.confirmation_required).toBe(true);
+
+    // The operator removes the domain while the challenge is still live.
+    allowed.delete("example.com");
+
+    await expect(svc.verify({ email: "late@example.com", code: String(signup.dev_code) }))
+      .rejects.toThrow(AuthError);
+  });
+});
+
+describe("session-authenticated paths are gated too", () => {
+  test("whoami and token stop working once the allowlist no longer covers the user", async () => {
+    const allowed = new Set(["example.com"]);
+    const store = new FakeIdpStore();
+    const svc = new AuthService({
+      store, signingSecret: "test-secret", apiKeysTable: "api_keys", otpEcho: true,
+      emailPolicy: { allowedDomains: allowed, requireConfirmation: false },
+    });
+    const res = await svc.signup({ email: "user@example.com", name: "U", password: "pw-pw-pw-pw" });
+    const session = res.session as string;
+    expect(await svc.whoami(session)).toBeTruthy();
+
+    // The operator removes the domain — or loses the configuration entirely.
+    allowed.clear();
+
+    await expect(svc.whoami(session)).rejects.toThrow(AuthError);
+    // token() mints fleet credentials, including long-lived v1 API keys whose
+    // expiry is independent of the 24h session.
+    await expect(svc.token({ sessionToken: session, app: "tenants" })).rejects.toThrow(AuthError);
+  });
+});
+
+describe("misconfiguration is not reported as a caller error", () => {
+  test("signup and resend answer 503, not 400, when the allowlist is unconfigured", async () => {
+    const svc = new AuthService({
+      store: new FakeIdpStore(), signingSecret: "test-secret", apiKeysTable: "api_keys",
+    });
+    for (const call of [
+      () => svc.signup({ email: "not-an-email", name: "X" }),
+      () => svc.resend({ email: "not-an-email" }),
+      () => svc.signup({ email: "", name: "X" }),
+    ]) {
+      const err = await call().catch((e) => e);
+      expect(err).toBeInstanceOf(AuthError);
+      expect((err as AuthError).status).toBe(503);
+      expect((err as AuthError).code).toBe("email_allowlist_not_configured");
+    }
   });
 });

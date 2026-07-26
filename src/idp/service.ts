@@ -13,7 +13,7 @@ import type { IdpStoreApi, MembershipRow, UserRow } from "./store.js";
 import { hashPassword, sha256, verifyPassword } from "./passwords.js";
 import { isUuid, newId, ROOT_TENANT_ID } from "./ids.js";
 import { buildJwks, signAccessToken, MAX_ACCESS_TOKEN_TTL_SECONDS, type JwksDocument } from "./tokens.js";
-import { isEmailDomainAllowed, type EmailPolicy } from "./policy.js";
+import { checkEmailDomain, denyAllEmailPolicy, type EmailPolicy } from "./policy.js";
 import { NoopMailer, type Mailer } from "./mailer.js";
 
 export const SESSION_TTL_SECONDS = 24 * 60 * 60;
@@ -56,7 +56,11 @@ export interface AuthServiceOptions {
   emailPolicy?: EmailPolicy;
   /** Sends confirmation / login codes (SES). Defaults to a no-op. */
   mailer?: Mailer;
-  /** Public base URL for one-click confirmation links. */
+  /**
+   * Public base URL for one-click confirmation links, e.g.
+   * `https://auth.example.com`. There is no default: when it is absent the
+   * confirmation email carries the code only, with no one-click link.
+   */
   confirmUrlBase?: string;
   nowMs?: () => number;
 }
@@ -106,7 +110,7 @@ export class AuthService {
   private readonly otpEcho: boolean;
   private readonly emailPolicy: EmailPolicy;
   private readonly mailer: Mailer;
-  private readonly confirmUrlBase: string;
+  private readonly confirmUrlBase: string | undefined;
   private readonly now: () => number;
 
   constructor(options: AuthServiceOptions) {
@@ -115,22 +119,22 @@ export class AuthService {
     this.apiKeysTable = options.apiKeysTable;
     this.apiKeys = options.apiKeys;
     this.otpEcho = options.otpEcho ?? false;
-    // Default: no allowlist (tests/local). Production wires the real policy.
-    this.emailPolicy = options.emailPolicy ?? { allowedDomains: null, requireConfirmation: false };
+    // FAIL CLOSED: omitting the policy denies every address rather than opening
+    // the front door. Call sites that genuinely want no gate (local/dev, tests)
+    // must pass `UNRESTRICTED_EMAIL_POLICY` explicitly.
+    this.emailPolicy = options.emailPolicy ?? denyAllEmailPolicy();
     this.mailer = options.mailer ?? new NoopMailer();
-    this.confirmUrlBase = (options.confirmUrlBase ?? "https://tenants.hasna.xyz").replace(/\/+$/, "");
+    this.confirmUrlBase = options.confirmUrlBase?.replace(/\/+$/, "") || undefined;
     this.now = options.nowMs ?? (() => Date.now());
   }
 
-  /** Reject any email whose domain is not on the (config-driven) allowlist. */
+  /**
+   * Reject any email whose domain is not on the (config-driven) allowlist.
+   * An unconfigured allowlist denies everything — see `policy.ts`.
+   */
   private assertEmailAllowed(email: string): void {
-    if (!isEmailDomainAllowed(email, this.emailPolicy)) {
-      throw new AuthError(
-        403,
-        "Sign-up and login are restricted to Hasna email addresses (hasna.xyz and other hasna.<tld> domains).",
-        "email_domain_not_allowed",
-      );
-    }
+    const denial = checkEmailDomain(email, this.emailPolicy);
+    if (denial) throw new AuthError(denial.status, denial.message, denial.code);
   }
 
   async jwks(): Promise<JwksDocument> {
@@ -144,9 +148,11 @@ export class AuthService {
     ip?: string | null; userAgent?: string | null;
   }): Promise<Record<string, unknown>> {
     const email = (input.email ?? "").trim().toLowerCase();
-    if (!email || !email.includes("@")) throw new AuthError(400, "A valid email is required.", "invalid_email");
-    // Login front door: only hasna-branded email domains may sign up.
+    // Front door FIRST: an unconfigured allowlist is the SERVER's fault and must
+    // not be reported as a malformed address. Once the allowlist is configured,
+    // `checkEmailDomain` rejects malformed addresses itself.
     this.assertEmailAllowed(email);
+    if (!email || !email.includes("@")) throw new AuthError(400, "A valid email is required.", "invalid_email");
     const kind = input.kind === "agent" ? "agent" : "human";
 
     if (await this.store.getUserByEmail(email)) {
@@ -208,7 +214,7 @@ export class AuthService {
   async login(input: { email?: string; password?: string; ip?: string | null; userAgent?: string | null }): Promise<Record<string, unknown>> {
     const email = (input.email ?? "").trim().toLowerCase();
     if (!email) throw new AuthError(400, "email is required.", "invalid_email");
-    // Login front door: only hasna-branded email domains may log in.
+    // Login front door: only allowlisted email domains may log in.
     this.assertEmailAllowed(email);
     const user = await this.store.getUserByEmail(email);
 
@@ -241,8 +247,8 @@ export class AuthService {
 
   async resend(input: { email?: string }): Promise<Record<string, unknown>> {
     const email = (input.email ?? "").trim().toLowerCase();
-    if (!email || !email.includes("@")) throw new AuthError(400, "A valid email is required.", "invalid_email");
     this.assertEmailAllowed(email);
+    if (!email || !email.includes("@")) throw new AuthError(400, "A valid email is required.", "invalid_email");
     // Same shape whether or not the account exists / is already confirmed
     // (no enumeration). Only send a fresh code when there is an unconfirmed user.
     const user = await this.store.getUserByEmail(email);
@@ -258,6 +264,11 @@ export class AuthService {
     const email = (input.email ?? "").trim().toLowerCase();
     const code = (input.code ?? "").trim();
     if (!email || !code) throw new AuthError(400, "email and code are required.", "invalid_request");
+    // Re-check the front door before the step that actually mints a session: a
+    // challenge issued while a domain was allowed must not still be redeemable
+    // after that domain is removed from the allowlist (or the allowlist is
+    // unconfigured). Every session-minting path is gated, not just the entry.
+    this.assertEmailAllowed(email);
 
     // Try login then signup challenges.
     for (const purpose of ["login", "signup"] as const) {
@@ -446,13 +457,16 @@ export class AuthService {
     });
     const out: Record<string, unknown> = { challenge: true, purpose, expires_in: OTP_TTL_SECONDS };
 
-    // Deliver the code + a one-click confirmation link over email (SES). A mail
-    // failure must not 500 the request (the code is still valid; the client can
-    // resend) — we record delivery status and keep going.
-    const link = `${this.confirmUrlBase}/v1/auth/confirm?email=${encodeURIComponent(email)}&code=${code}`;
+    // Deliver the code + (when a public base URL is configured) a one-click
+    // confirmation link over email. A mail failure must not 500 the request —
+    // the code is still valid and the client can resend — so we record delivery
+    // status and keep going.
+    const link = this.confirmUrlBase
+      ? `${this.confirmUrlBase}/v1/auth/confirm?email=${encodeURIComponent(email)}&code=${code}`
+      : undefined;
     try {
       const sent = await this.mailer.sendConfirmation({
-        to: email, code, link, expiresMinutes: Math.round(OTP_TTL_SECONDS / 60), purpose,
+        to: email, code, ...(link ? { link } : {}), expiresMinutes: Math.round(OTP_TTL_SECONDS / 60), purpose,
       });
       if (sent.messageId) out["email_message_id"] = sent.messageId;
       out["email_sent"] = !sent.skipped;
@@ -490,6 +504,13 @@ export class AuthService {
     if (row.expires_at && new Date(row.expires_at).getTime() < this.now()) throw new AuthError(401, "Session expired.", "expired_session");
     const user = row.user_id ? await this.store.getUserById(row.user_id) : null;
     if (!user) throw new AuthError(401, "Session principal not found.", "invalid_session");
+    // The front door is re-checked on EVERY session-authenticated call, not only
+    // at signup/login. Otherwise a session outlives the policy: removing a domain
+    // — or losing the allowlist configuration entirely — would leave existing
+    // sessions able to mint fresh fleet tokens, including long-lived v1 API keys
+    // whose expiry is independent of the session. Service principals carry no
+    // email and are governed by their own credentials, not this gate.
+    if (user.email) this.assertEmailAllowed(user.email);
     const memberships = await this.store.listMembershipsForPrincipal(user.id, "user");
     return { user, memberships };
   }

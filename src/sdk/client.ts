@@ -88,7 +88,7 @@ export class TenantsClient {
     return this.request("GET", `/v1/.well-known/jwks.json`, { body: undefined, query: undefined, init });
   }
 
-  /** Create a tenant/user (hasna emails only) and send an email confirmation code. */
+  /** Create a tenant/user (allowlisted email domains only) and send an email confirmation code. */
   async signup(body: SignupInput, init?: RequestInit): Promise<AuthResponse> {
     return this.request("POST", `/v1/auth/signup`, { body, query: undefined, init });
   }

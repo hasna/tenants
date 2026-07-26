@@ -20,9 +20,10 @@ offline against that JWKS.
   and org tenants created on signup.
 - **Users & principals** — human/agent users and machine service principals,
   each with tenant memberships and roles.
-- **Login front door** — signup / login restricted to hasna-branded email
-  domains, with an email-confirmation gate (OTP + one-click link) delivered via
-  Amazon SES.
+- **Login front door** — signup / login restricted to an operator-configured
+  allowlist of email domains (exact match, no built-in default: an unconfigured
+  allowlist denies everyone), with an email-confirmation gate (OTP + one-click
+  link) delivered via Amazon SES.
 - **Sessions & tokens** — password/OTP sessions, and per-app fleet access tokens
   (EdDSA JWS) minted from a session, scoped by membership role. Token TTL is
   server-bounded (24h ceiling — callers can only shorten it), and every minted
@@ -67,9 +68,18 @@ GET  /v1/introspect?kid=…                        (API-key / access-token auth,
 | `HASNA_TENANTS_DATABASE_URL` | Postgres connection string |
 | `HASNA_TENANTS_API_SIGNING_KEY` | HMAC signing secret (or `HASNA_API_SIGNING_KEY`) |
 | `HASNA_TENANTS_JWT_SIGNING_KEY` / `_JWT_KID` | Optional EdDSA private JWK (Secrets Manager path) |
-| `HASNA_TENANTS_ALLOWED_EMAIL_DOMAINS` | Override the hasna email allowlist |
+| `HASNA_TENANTS_ALLOWED_EMAIL_DOMAINS` | **Required.** Comma-separated exact email domains allowed to sign up / log in. There is no default — unset means nobody may sign up or log in |
+| `HASNA_TENANTS_DISABLE_EMAIL_ALLOWLIST=1` | Explicit opt-out: accept every email domain (local/dev only) |
 | `HASNA_TENANTS_EMAIL_ENABLED=1` | Enable SES confirmation email |
+| `HASNA_TENANTS_MAIL_FROM` | Required when email is enabled — DKIM-verified SES sender, e.g. `Example Auth <auth@auth.example.com>` |
+| `HASNA_TENANTS_CONFIRM_URL_BASE` | Required when email is enabled — public base URL for one-click confirmation links |
 | `HASNA_TENANTS_API_URL` | Base URL used by the `tenants` CLI |
+
+The email allowlist **fails closed**. An unset or empty
+`HASNA_TENANTS_ALLOWED_EMAIL_DOMAINS` rejects every signup and login with
+`503 email_allowlist_not_configured`, naming the variable to set. Missing
+configuration must never degrade into "allow every domain"; disabling the gate
+requires the separate, explicit `HASNA_TENANTS_DISABLE_EMAIL_ALLOWLIST=1`.
 
 ## Develop
 
@@ -85,6 +95,29 @@ Applying the schema against a real database:
 HASNA_TENANTS_STORAGE_MODE=cloud HASNA_TENANTS_DATABASE_URL=postgres://… \
   bun run src/server/index.ts migrate --dry-run
 ```
+
+## Releasing
+
+```bash
+bun run verify:release   # typecheck + tests + build + packed-artifact scan
+```
+
+`bun run check:artifact` inspects the **actual packed artifact** — it takes the
+file list from `npm pack --dry-run --json` and scans the content of every file
+npm would publish for owned domain literals, internal hosts and credential
+patterns. Source-level checks are not sufficient: a published bundle can contain
+strings that no reviewer sees in `src/`. The same check runs from the `prepack`
+lifecycle hook, so `npm publish` and `bun publish` both run it.
+
+A packed file the guard cannot read as text is **not** treated as clean — it is
+scanned as raw bytes and as UTF-16 and then fails the check, so a stray NUL byte
+cannot hide a string. A genuine false positive is annotated in place with
+`artifact-check-ignore: <reason>`; every honoured annotation is printed on every
+run, so a suppression is never silent.
+
+One residual gap, stated plainly: `npm publish --ignore-scripts` skips every
+lifecycle hook, this one included, and no package.json setting can prevent that.
+Release through `bun run verify:release`.
 
 ## License
 

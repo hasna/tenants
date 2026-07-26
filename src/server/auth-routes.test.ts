@@ -1,6 +1,7 @@
 import { beforeAll, describe, expect, test } from "bun:test";
 import { generateKeyPairSync, sign as edSign } from "node:crypto";
 import { AuthService } from "../idp/service.js";
+import { UNRESTRICTED_EMAIL_POLICY } from "../idp/policy.js";
 import type { IdpStoreApi, MembershipRow, SessionRow, TenantRow, UserRow } from "../idp/store.js";
 import { TOKEN_ALG, TOKEN_ISSUER, TOKEN_TYPE, signingKeyFromPrivateJwk, type JwkPublic, type SigningKey } from "../idp/tokens.js";
 import { ROOT_TENANT_ID, newId } from "../idp/ids.js";
@@ -75,7 +76,9 @@ describe("Tenants IdP HTTP routes", () => {
 
   beforeAll(async () => {
     fakeStore = new FakeIdpStore();
-    const auth = new AuthService({ store: fakeStore, signingSecret: SIGNING_SECRET, apiKeysTable: "api_keys", otpEcho: true });
+    // Route-level tests: front door explicitly unrestricted (the constructor
+    // default denies every address).
+    const auth = new AuthService({ store: fakeStore, signingSecret: SIGNING_SECRET, apiKeysTable: "api_keys", otpEcho: true, emailPolicy: UNRESTRICTED_EMAIL_POLICY });
     const built = await createFetchHandler({ client: shimClient, signingSecret: SIGNING_SECRET, auth });
     fetchHandler = built.fetch;
   });
@@ -294,5 +297,47 @@ describe("Tenants IdP HTTP routes", () => {
     const foreignBody = await foreign.json();
     expect(foreignBody).toEqual({ active: false, kid: "kid-foreign-tenant" });
     expect(foreignBody.user_id).toBeUndefined();
+  });
+});
+
+// The front door must fail CLOSED at the HTTP boundary: a deployment that never
+// configured HASNA_TENANTS_ALLOWED_EMAIL_DOMAINS rejects everyone rather than
+// admitting everyone. This is the regression test for the allowlist default.
+describe("unconfigured allowlist fails closed over HTTP", () => {
+  let fetchHandler: (req: Request) => Promise<Response>;
+
+  beforeAll(async () => {
+    // No `emailPolicy` at all — exactly what an unconfigured deployment gets.
+    const auth = new AuthService({
+      store: new FakeIdpStore(), signingSecret: SIGNING_SECRET, apiKeysTable: "api_keys", otpEcho: true,
+    });
+    fetchHandler = (await createFetchHandler({ client: shimClient, signingSecret: SIGNING_SECRET, auth })).fetch;
+  });
+
+  const post = (path: string, body: unknown) =>
+    fetchHandler(new Request(`http://x${path}`, {
+      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body),
+    }));
+
+  test("POST /signup is refused with a message naming the env var", async () => {
+    const res = await post("/signup", { email: "anyone@example.com", name: "A", password: "pw-pw-pw-pw" });
+    expect(res.status).toBe(503);
+    const body = await res.json();
+    expect(body.reason).toBe("email_allowlist_not_configured");
+    expect(body.error).toContain("HASNA_TENANTS_ALLOWED_EMAIL_DOMAINS");
+    expect(body.session).toBeUndefined();
+  });
+
+  test("POST /login is refused too (no fail-open on the login path)", async () => {
+    const res = await post("/login", { email: "anyone@example.com", password: "pw-pw-pw-pw" });
+    expect(res.status).toBe(503);
+    expect((await res.json()).reason).toBe("email_allowlist_not_configured");
+  });
+
+  test("no address gets in — not even one that looks internal", async () => {
+    for (const email of ["a@example.com", "b@sub.example.net", "c@localhost.test"]) {
+      const res = await post("/signup", { email, name: "X", password: "pw-pw-pw-pw" });
+      expect(res.status).toBe(503);
+    }
   });
 });

@@ -1,14 +1,17 @@
 // Deterministic tenant identifiers for the fleet IdP.
 //
 // The fleet auth/tenancy standard (v2) fixes ONE canonical root-tenant UUID that
-// every app backfills pre-existing rows to. It is reproducible as
-//   uuidv5( uuidv5(DNS, "hasna.xyz"), "tenant:hasna:root" )
-// and MUST equal the constant below. Brand children are derived the same way so
-// their ids are stable across every seed run and every machine.
+// every app backfills pre-existing rows to, derived as
+//   uuidv5( TENANT_NAMESPACE, "tenant:hasna:root" )
+// and it MUST equal the constant below. Brand children are derived the same way
+// so their ids are stable across every seed run and every machine.
+//
+// TENANT_NAMESPACE itself is a FIXED, opaque UUIDv5 frozen by the standard. It
+// is stored as a literal rather than recomputed from a seed string: the value is
+// what matters, and changing it — or the derivation that produced it — would
+// silently repoint every tenant id in every deployment.
 
 import { createHash, randomUUID } from "node:crypto";
-
-const DNS_NAMESPACE = Buffer.from("6ba7b8109dad11d180b400c04fd430c8", "hex");
 
 /** RFC 4122 v5 (SHA-1) UUID from a name under a 16-byte namespace. */
 export function uuidv5(name: string, namespace: Buffer): string {
@@ -26,8 +29,11 @@ function parseUuid(uuid: string): Buffer {
   return Buffer.from(uuid.replace(/-/g, ""), "hex");
 }
 
-/** Namespace for all hasna tenant ids: uuidv5(DNS, "hasna.xyz"). */
-export const HASNA_TENANT_NAMESPACE = uuidv5("hasna.xyz", DNS_NAMESPACE);
+/**
+ * Fixed namespace UUID under which every tenant id is derived. Frozen by the
+ * fleet auth/tenancy standard v2 — never regenerate it.
+ */
+export const HASNA_TENANT_NAMESPACE = "709cdf8b-c278-5052-91e1-cc919d35b9e9";
 
 /** Derive a stable tenant UUID from `tenant:<slug>:<kind>`. */
 export function deriveTenantId(slug: string, kind: string): string {

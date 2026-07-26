@@ -33,9 +33,9 @@ Commands:
   auth introspect --kid <kid> --session <s>|--key <apiKey>
   version
 
-Only hasna.xyz / hasna.<tld> emails may sign up or log in; signup requires email confirmation.
-Requires HASNA_TENANTS_API_URL (e.g. https://tenants.hasna.xyz). Session tokens are
-returned by verify/login (after confirmation).
+Sign-up and login are limited to the email domains the server allows; signup requires
+email confirmation. Requires HASNA_TENANTS_API_URL (the tenants API base URL). Session
+tokens are returned by verify/login (after confirmation).
 `;
 
 export async function runCli(argv = process.argv.slice(2)): Promise<void> {
@@ -79,7 +79,7 @@ async function dispatchAuth(rest: string[], parsed: ParsedArgs, json: boolean): 
   const [subcommand] = rest;
   const apiUrl = (process.env["HASNA_TENANTS_API_URL"] ?? "").replace(/\/+$/, "");
   if (!apiUrl && subcommand !== "help") {
-    throw new Error("Set HASNA_TENANTS_API_URL to the tenants API base (e.g. https://tenants.hasna.xyz).");
+    throw new Error("Set HASNA_TENANTS_API_URL to the tenants API base URL (e.g. https://auth.example.com).");
   }
 
   const call = async (method: string, path: string, body?: unknown, session?: string): Promise<unknown> => {
@@ -106,8 +106,9 @@ async function dispatchAuth(rest: string[], parsed: ParsedArgs, json: boolean): 
   auth jwks
   auth introspect --kid <kid> --session <s>|--key <apiKey>
 
-Only hasna.xyz / hasna.<tld> emails may sign up or log in; signup requires email confirmation.
-Requires HASNA_TENANTS_API_URL. Session tokens are returned by verify/login (after confirmation).`, json);
+Sign-up and login are limited to the email domains the server allows; signup requires
+email confirmation. Requires HASNA_TENANTS_API_URL. Session tokens are returned by
+verify/login (after confirmation).`, json);
     return;
   }
 
