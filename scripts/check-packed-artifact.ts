@@ -15,7 +15,8 @@
  * built-in rules), and scans the CONTENT of those files. Whatever npm would
  * upload is what gets read.
  *
- * It runs from two places so it cannot be bypassed:
+ * It runs from two places, so neither the normal gate nor a direct publish
+ * misses it (see the residual `--ignore-scripts` gap below):
  *   - `bun run verify:release` — the normal pre-release gate.
  *   - `prepack` — npm's own lifecycle hook, which runs on `npm pack` AND
  *     `npm publish`. Publishing directly, without the verify script, still runs
@@ -28,7 +29,9 @@
  * encoded (base64), or fetched from a network service will not be seen. It
  * catches the shape of the incident that happened — a constant compiled into the
  * bundle — and every routine variant of it, not an adversary hiding data on
- * purpose. Binary files are listed but not scanned.
+ * purpose. Files that are not plain text are scanned as raw bytes AND as UTF-16,
+ * and then FAIL the check rather than being skipped — the guard never calls a
+ * file clean that it could not read.
  *
  * `npm publish --ignore-scripts` skips ALL lifecycle hooks, this one included.
  * No package.json setting can defeat that flag; closing it needs a publish path
@@ -77,6 +80,27 @@ export interface Rule {
   pattern: RegExp;
   /** Mask the matched text in output (credentials must never be echoed). */
   redact?: boolean;
+  /** Discard a match that the pattern over-approximates. */
+  ignoreMatch?: (match: string) => boolean;
+}
+
+/**
+ * Trailing labels that make a dotted token a FILENAME rather than a hostname.
+ * `@hasna/contracts` ships a config file called `hasna.contract.json`, and a
+ * guard that fails a release because a doc comment mentions it is a guard that
+ * engineers switch off. Only applied when a label FOLLOWS the apex, so a real
+ * two-label domain such as `<brand>.md` is still reported.
+ */
+const FILE_EXTENSION_LABELS = new Set([
+  "json", "js", "mjs", "cjs", "ts", "tsx", "jsx", "map", "lock", "txt", "yaml", "yml",
+  "toml", "html", "css", "png", "jpg", "jpeg", "svg", "gif", "log", "bak", "tgz", "zip",
+  "sh", "py", "rs", "go", "java", "rb", "php", "sql", "csv", "xml", "ini", "cfg", "conf",
+]);
+
+/** `<brand>.contract.json` is a filename; `<brand>.co.uk` and `<brand>.md` are not. */
+function isFilenameNotDomain(match: string): boolean {
+  const labels = match.toLowerCase().split(".");
+  return labels.length > 2 && FILE_EXTENSION_LABELS.has(labels[labels.length - 1]!);
 }
 
 export const RULES: Rule[] = [
@@ -85,12 +109,14 @@ export const RULES: Rule[] = [
     severity: "disclosure",
     description: "Owned apex domain literal (the 0.1.0 incident class)",
     pattern: new RegExp(String.raw`\b(?:${BRAND_ALTERNATION})\.[a-z]{2,24}(?:\.[a-z]{2,24})?\b`, "gi"),
+    ignoreMatch: isFilenameNotDomain,
   },
   {
     id: "brand-subdomain",
     severity: "disclosure",
     description: "Hostname under an owned apex domain",
     pattern: new RegExp(String.raw`\b[a-z0-9][a-z0-9-]*\.(?:${BRAND_ALTERNATION})\.[a-z]{2,24}\b`, "gi"),
+    ignoreMatch: isFilenameNotDomain,
   },
   {
     id: "internal-host",
@@ -195,22 +221,53 @@ export interface Violation {
   severity: Severity;
   description: string;
   excerpt: string;
+  /** Set when the hit was found by decoding the file as something other than text. */
+  encoding?: string;
 }
+
+/** An `artifact-check-ignore:` annotation that suppressed a line. */
+export interface HonoredIgnore {
+  file: string;
+  line: number;
+  reason: string;
+}
+
+/**
+ * Per-line escape hatch: `artifact-check-ignore: <reason>` on the same line
+ * suppresses that line. It exists so a false positive gets annotated in a
+ * reviewable diff instead of someone deleting the `prepack` hook — the usual
+ * fate of a guard that cries wolf. Every honoured ignore is PRINTED on every
+ * run, pass or fail, and a reason is mandatory.
+ */
+const IGNORE_MARKER = /artifact-check-ignore:\s*(\S[^\n]*)/;
 
 function mask(value: string): string {
   if (value.length <= 6) return "*".repeat(value.length);
   return `${value.slice(0, 4)}${"*".repeat(Math.min(value.length - 4, 20))}<redacted>`;
 }
 
+export interface ScanTextResult {
+  violations: Violation[];
+  ignored: HonoredIgnore[];
+}
+
 /** Scan one file's text against every rule. Exported for unit tests. */
-export function scanText(text: string, file = "<memory>"): Violation[] {
+export function scanTextDetailed(text: string, file = "<memory>", encoding?: string): ScanTextResult {
   const violations: Violation[] = [];
-  const lines = text.split("\n");
-  for (const rule of RULES) {
-    for (let i = 0; i < lines.length; i++) {
-      const line = lines[i]!;
+  const ignored: HonoredIgnore[] = [];
+  // Split on CR as well: a minified bundle is one long line, and generated files
+  // may use CRLF — a rule must not lose its line anchor because of either.
+  const lines = text.split(/\r\n|\r|\n/);
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i]!;
+    const ignore = IGNORE_MARKER.exec(line);
+    let lineHits = 0;
+    for (const rule of RULES) {
       rule.pattern.lastIndex = 0;
       for (const match of line.matchAll(rule.pattern)) {
+        if (rule.ignoreMatch?.(match[0])) continue;
+        lineHits++;
+        if (ignore) continue;
         violations.push({
           file,
           line: i + 1,
@@ -218,11 +275,18 @@ export function scanText(text: string, file = "<memory>"): Violation[] {
           severity: rule.severity,
           description: rule.description,
           excerpt: rule.redact ? mask(match[0]) : match[0],
+          ...(encoding ? { encoding } : {}),
         });
       }
     }
+    if (ignore && lineHits > 0) ignored.push({ file, line: i + 1, reason: ignore[1]!.trim() });
   }
-  return violations;
+  return { violations, ignored };
+}
+
+/** Thin wrapper returning only the violations. */
+export function scanText(text: string, file = "<memory>"): Violation[] {
+  return scanTextDetailed(text, file).violations;
 }
 
 // ── packed file list ─────────────────────────────────────────────────────────
@@ -243,6 +307,11 @@ export function listPackedFiles(cwd: string): PackedFile[] {
     cwd,
     encoding: "utf8",
     maxBuffer: 64 * 1024 * 1024,
+    // Recursion marker for the CHILD only. If `--ignore-scripts` ever stops
+    // suppressing the prepack hook, the nested guard sees this and exits 2 — a
+    // loud failure instead of an infinite loop. It is never read from the
+    // ambient parent environment, so it cannot serve as a kill switch.
+    env: { ...process.env, TENANTS_PACK_GUARD_ACTIVE: "1" },
   });
   if (result.error) throw new Error(`could not run \`npm pack\`: ${result.error.message}`);
   if (result.status !== 0) {
@@ -257,32 +326,49 @@ export function listPackedFiles(cwd: string): PackedFile[] {
   return files;
 }
 
-/** A NUL byte in the head of a file is a good-enough binary signal. */
+/** A NUL byte anywhere means the file is not plain text. */
 function isBinary(buf: Buffer): boolean {
-  return buf.subarray(0, 8192).includes(0);
+  return buf.includes(0);
 }
+
+/**
+ * Packed paths permitted to be non-text. EMPTY ON PURPOSE: a file this guard
+ * cannot read as text is a file it cannot certify, and "unscannable" must never
+ * read as "clean". Adding a path here is a reviewed decision, visible in a diff.
+ */
+export const ALLOWED_BINARY_PATHS: readonly string[] = [];
 
 export interface ScanReport {
   scanned: string[];
-  skipped: string[];
+  /** Packed files that are not plain text. Never silently tolerated. */
+  binary: string[];
   violations: Violation[];
+  ignored: HonoredIgnore[];
 }
 
 export function scanPackedArtifact(cwd: string): ScanReport {
   const files = listPackedFiles(cwd);
-  const report: ScanReport = { scanned: [], skipped: [], violations: [] };
+  const report: ScanReport = { scanned: [], binary: [], violations: [], ignored: [] };
   for (const file of files) {
     const abs = resolve(cwd, file.path);
     if (!existsSync(abs)) {
       throw new Error(`npm would pack \`${file.path}\`, but it is missing from the working tree`);
     }
     const buf = readFileSync(abs);
-    if (isBinary(buf)) {
-      report.skipped.push(file.path);
-      continue;
-    }
     report.scanned.push(file.path);
-    report.violations.push(...scanText(buf.toString("utf8"), file.path));
+
+    // latin1 maps bytes 1:1, so ASCII literals are found even in a file that is
+    // not valid UTF-8 — a single NUL byte can no longer hide a domain.
+    const primary = scanTextDetailed(buf.toString("latin1"), file.path);
+    report.violations.push(...primary.violations);
+    report.ignored.push(...primary.ignored);
+
+    if (isBinary(buf)) {
+      // Also look for UTF-16 encoded literals — the other common way an ASCII
+      // string hides inside binary-looking bytes.
+      report.violations.push(...scanTextDetailed(buf.toString("utf16le"), file.path, "utf16le").violations);
+      if (!ALLOWED_BINARY_PATHS.includes(file.path)) report.binary.push(file.path);
+    }
   }
 
   // A guard that scans nothing must never report success: an unbuilt or
@@ -309,11 +395,27 @@ function main(): number {
     return 2;
   }
 
+  // Suppressions print on every run, pass or fail: an ignore nobody sees is an
+  // ignore that outlives its reason.
+  for (const i of report.ignored) {
+    console.error(`  ! ignored ${i.file}:${i.line} — ${i.reason}`);
+  }
+
+  if (report.binary.length > 0) {
+    console.error(
+      `✗ ${report.binary.length} packed file(s) are not plain text, so their contents cannot be ` +
+        `certified:\n${report.binary.map((p) => `    ${p}`).join("\n")}\n\n` +
+        "Remove them from the package, or add them to ALLOWED_BINARY_PATHS with a reason.\n" +
+        "A file this guard cannot read is a file it must not call clean.",
+    );
+    return 1;
+  }
+
   if (report.violations.length === 0) {
     console.log(
-      `✓ packed artifact clean — ${report.scanned.length} file(s) scanned` +
-        `${report.skipped.length ? `, ${report.skipped.length} binary file(s) skipped` : ""}, ` +
-        `${RULES.length} rules applied`,
+      `✓ packed artifact clean — ${report.scanned.length} file(s) scanned, ` +
+        `${RULES.length} rules applied` +
+        `${report.ignored.length ? `, ${report.ignored.length} line(s) ignored by annotation` : ""}`,
     );
     return 0;
   }
@@ -326,7 +428,8 @@ function main(): number {
   for (const [file, violations] of byFile) {
     console.error(`  ${file}`);
     for (const v of violations) {
-      console.error(`    line ${v.line}  [${v.ruleId}] ${v.description}: ${v.excerpt}`);
+      const where = v.encoding ? `line ${v.line} (${v.encoding})` : `line ${v.line}`;
+      console.error(`    ${where}  [${v.ruleId}] ${v.description}: ${v.excerpt}`);
     }
     console.error("");
   }
@@ -338,12 +441,18 @@ function main(): number {
 }
 
 if (import.meta.main) {
-  // Safety net: if `--ignore-scripts` ever stops suppressing the prepack hook,
-  // the nested run exits quietly and the outer run still decides the outcome.
+  // Recursion detection must FAIL, never pass. An earlier version exited 0 here,
+  // which turned an inherited environment variable into a silent kill switch:
+  // `TENANTS_PACK_GUARD_ACTIVE=1 npm publish` would have sailed through with a
+  // leak in the tarball. The nested pack passes `--ignore-scripts`, so this is
+  // expected to be unreachable — and if it is ever reached, that is a defect to
+  // surface, not a reason to skip the scan.
   if (process.env["TENANTS_PACK_GUARD_ACTIVE"] === "1") {
-    console.error("… nested artifact check skipped (outer run owns the result)");
-    process.exit(0);
+    console.error(
+      "✗ artifact check re-entered itself (TENANTS_PACK_GUARD_ACTIVE already set).\n" +
+        "  This variable is internal and must not be set by hand.",
+    );
+    process.exit(2);
   }
-  process.env["TENANTS_PACK_GUARD_ACTIVE"] = "1";
   process.exit(main());
 }

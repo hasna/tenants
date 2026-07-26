@@ -109,6 +109,12 @@ patterns. Source-level checks are not sufficient: a published bundle can contain
 strings that no reviewer sees in `src/`. The same check runs from the `prepack`
 lifecycle hook, so `npm publish` and `bun publish` both run it.
 
+A packed file the guard cannot read as text is **not** treated as clean — it is
+scanned as raw bytes and as UTF-16 and then fails the check, so a stray NUL byte
+cannot hide a string. A genuine false positive is annotated in place with
+`artifact-check-ignore: <reason>`; every honoured annotation is printed on every
+run, so a suppression is never silent.
+
 One residual gap, stated plainly: `npm publish --ignore-scripts` skips every
 lifecycle hook, this one included, and no package.json setting can prevent that.
 Release through `bun run verify:release`.

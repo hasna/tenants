@@ -144,3 +144,22 @@ describe("env configuration", () => {
     expect(off.requireConfirmation).toBe(false);
   });
 });
+
+describe("conflicting configuration", () => {
+  test("a configured allowlist beats a stale DISABLE=1", () => {
+    // A stale opt-out in a shared env file must not silently void an allowlist
+    // the operator just set — they would think the door is shut.
+    const p = emailPolicyFromEnv({
+      [DISABLE_EMAIL_ALLOWLIST_ENV]: "1",
+      [ALLOWED_EMAIL_DOMAINS_ENV]: "example.com",
+    } as NodeJS.ProcessEnv);
+    expect(p.allowedDomains).not.toBeNull();
+    expect(isEmailDomainAllowed("a@example.com", p)).toBe(true);
+    expect(isEmailDomainAllowed("a@elsewhere.test", p)).toBe(false);
+  });
+
+  test("DISABLE=1 on its own still opens the gate", () => {
+    expect(emailPolicyFromEnv({ [DISABLE_EMAIL_ALLOWLIST_ENV]: "1" } as NodeJS.ProcessEnv).allowedDomains)
+      .toBeNull();
+  });
+});

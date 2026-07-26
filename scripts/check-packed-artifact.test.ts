@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { BRAND_DOMAIN_LABELS, RULES, scanText } from "./check-packed-artifact.js";
+import { BRAND_DOMAIN_LABELS, RULES, scanText, scanTextDetailed } from "./check-packed-artifact.js";
 
 // Fixtures are assembled at runtime so this test file does not itself contain
 // the literals the guard exists to keep out of the repository.
@@ -103,5 +103,114 @@ describe("rule table", () => {
     const text = `"${apex("xyz")}" and "${apex("dev")}"`;
     expect(scanText(text).length).toBe(scanText(text).length);
     expect(scanText(text).filter((v) => v.ruleId === "brand-domain").length).toBe(2);
+  });
+});
+
+// ── integration: the code paths where two proven bypasses lived ──────────────
+// scanText coverage alone missed both. These drive scanPackedArtifact over a
+// real temp package with a real `npm pack --dry-run`.
+
+import { afterEach, beforeEach } from "bun:test";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { scanPackedArtifact } from "./check-packed-artifact.js";
+
+let pkgDir: string;
+
+function writePackage(files: Record<string, string | Buffer>): void {
+  writeFileSync(join(pkgDir, "package.json"), JSON.stringify({
+    name: "artifact-guard-fixture", version: "0.0.0", files: ["dist"],
+  }, null, 2));
+  for (const [rel, content] of Object.entries(files)) {
+    const abs = join(pkgDir, rel);
+    mkdirSync(join(abs, ".."), { recursive: true });
+    writeFileSync(abs, content as never);
+  }
+}
+
+beforeEach(() => { pkgDir = mkdtempSync(join(tmpdir(), "artifact-guard-")); });
+afterEach(() => { rmSync(pkgDir, { recursive: true, force: true }); });
+
+describe("scanPackedArtifact (integration)", () => {
+  test("a clean packed set reports no violations", () => {
+    writePackage({ "dist/index.js": 'export const base = "https://auth.example.com";\n' });
+    const report = scanPackedArtifact(pkgDir);
+    expect(report.violations).toEqual([]);
+    expect(report.binary).toEqual([]);
+    expect(report.scanned).toContain("dist/index.js");
+  });
+
+  test("a leak in a packed file is found", () => {
+    writePackage({ "dist/index.js": `export const d = ["${apex("xyz")}"];\n` });
+    expect(scanPackedArtifact(pkgDir).violations.map((v) => v.ruleId)).toContain("brand-domain");
+  });
+
+  // REGRESSION: a single NUL byte used to make the guard SKIP the file and still
+  // report "✓ clean" while the domain shipped inside the tarball.
+  test("a NUL byte cannot hide a domain — scanned anyway AND flagged unscannable", () => {
+    writePackage({
+      "dist/index.js": "export const ok = 1;\n",
+      "dist/blob.js": Buffer.concat([Buffer.from([0]), Buffer.from(`const d = "${apex("xyz")}";`)]),
+    });
+    const report = scanPackedArtifact(pkgDir);
+    expect(report.scanned).toContain("dist/blob.js");
+    expect(report.binary).toContain("dist/blob.js");
+    expect(report.violations.some((v) => v.file === "dist/blob.js" && v.ruleId === "brand-domain")).toBe(true);
+  });
+
+  test("a UTF-16 encoded domain inside a binary file is found", () => {
+    writePackage({
+      "dist/index.js": "export const ok = 1;\n",
+      "dist/wide.js": Buffer.concat([Buffer.from([0, 0]), Buffer.from(apex("xyz"), "utf16le")]),
+    });
+    expect(scanPackedArtifact(pkgDir).violations.some((v) => v.encoding === "utf16le")).toBe(true);
+  });
+
+  test("no build output is an error, never a clean report", () => {
+    writePackage({});
+    expect(() => scanPackedArtifact(pkgDir)).toThrow(/no built/);
+  });
+
+  test("a minified single-line bundle is still scanned", () => {
+    writePackage({ "dist/index.js": `var a=1,b="${apex("xyz")}",c=3;`.repeat(20) });
+    const report = scanPackedArtifact(pkgDir);
+    expect(report.violations.length).toBeGreaterThan(0);
+    expect(report.violations[0]!.line).toBe(1);
+  });
+});
+
+describe("ignore annotations", () => {
+  test("an annotated line is suppressed and recorded with its reason", () => {
+    const text = `const a = "${apex("xyz")}"; // artifact-check-ignore: doc fixture`;
+    const { violations, ignored } = scanTextDetailed(text, "dist/x.js");
+    expect(violations).toEqual([]);
+    expect(ignored).toEqual([{ file: "dist/x.js", line: 1, reason: "doc fixture" }]);
+  });
+
+  test("a bare marker with no reason does not suppress", () => {
+    expect(scanTextDetailed(`const a = "${apex("xyz")}"; // artifact-check-ignore:`).violations.length)
+      .toBeGreaterThan(0);
+  });
+
+  test("the annotation only affects its own line", () => {
+    const text = `const a = "${apex("xyz")}"; // artifact-check-ignore: ok\nconst b = "${apex("dev")}";`;
+    const { violations } = scanTextDetailed(text);
+    expect(violations.length).toBe(1);
+    expect(violations[0]!.line).toBe(2);
+  });
+});
+
+describe("filename-shaped matches are not domains", () => {
+  test("<brand>.contract.json does not trip the guard", () => {
+    // The config-file convention of this package's own direct dependency.
+    expect(scanText(`see ${BRAND}.contract.json for details`)).toEqual([]);
+    expect(scanText(`import x from "./${BRAND}.config.yaml";`)).toEqual([]);
+  });
+
+  test("but real domains still do", () => {
+    for (const tld of ["md", "co.uk", "xyz"]) {
+      expect(scanText(`"${apex(tld)}"`).length).toBeGreaterThan(0);
+    }
   });
 });

@@ -148,9 +148,11 @@ export class AuthService {
     ip?: string | null; userAgent?: string | null;
   }): Promise<Record<string, unknown>> {
     const email = (input.email ?? "").trim().toLowerCase();
-    if (!email || !email.includes("@")) throw new AuthError(400, "A valid email is required.", "invalid_email");
-    // Login front door: only allowlisted email domains may sign up.
+    // Front door FIRST: an unconfigured allowlist is the SERVER's fault and must
+    // not be reported as a malformed address. Once the allowlist is configured,
+    // `checkEmailDomain` rejects malformed addresses itself.
     this.assertEmailAllowed(email);
+    if (!email || !email.includes("@")) throw new AuthError(400, "A valid email is required.", "invalid_email");
     const kind = input.kind === "agent" ? "agent" : "human";
 
     if (await this.store.getUserByEmail(email)) {
@@ -245,8 +247,8 @@ export class AuthService {
 
   async resend(input: { email?: string }): Promise<Record<string, unknown>> {
     const email = (input.email ?? "").trim().toLowerCase();
-    if (!email || !email.includes("@")) throw new AuthError(400, "A valid email is required.", "invalid_email");
     this.assertEmailAllowed(email);
+    if (!email || !email.includes("@")) throw new AuthError(400, "A valid email is required.", "invalid_email");
     // Same shape whether or not the account exists / is already confirmed
     // (no enumeration). Only send a fresh code when there is an unconfirmed user.
     const user = await this.store.getUserByEmail(email);
@@ -502,6 +504,13 @@ export class AuthService {
     if (row.expires_at && new Date(row.expires_at).getTime() < this.now()) throw new AuthError(401, "Session expired.", "expired_session");
     const user = row.user_id ? await this.store.getUserById(row.user_id) : null;
     if (!user) throw new AuthError(401, "Session principal not found.", "invalid_session");
+    // The front door is re-checked on EVERY session-authenticated call, not only
+    // at signup/login. Otherwise a session outlives the policy: removing a domain
+    // — or losing the allowlist configuration entirely — would leave existing
+    // sessions able to mint fresh fleet tokens, including long-lived v1 API keys
+    // whose expiry is independent of the session. Service principals carry no
+    // email and are governed by their own credentials, not this gate.
+    if (user.email) this.assertEmailAllowed(user.email);
     const memberships = await this.store.listMembershipsForPrincipal(user.id, "user");
     return { user, memberships };
   }

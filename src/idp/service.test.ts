@@ -343,3 +343,43 @@ describe("front door is re-checked before a session is minted", () => {
       .rejects.toThrow(AuthError);
   });
 });
+
+describe("session-authenticated paths are gated too", () => {
+  test("whoami and token stop working once the allowlist no longer covers the user", async () => {
+    const allowed = new Set(["example.com"]);
+    const store = new FakeIdpStore();
+    const svc = new AuthService({
+      store, signingSecret: "test-secret", apiKeysTable: "api_keys", otpEcho: true,
+      emailPolicy: { allowedDomains: allowed, requireConfirmation: false },
+    });
+    const res = await svc.signup({ email: "user@example.com", name: "U", password: "pw-pw-pw-pw" });
+    const session = res.session as string;
+    expect(await svc.whoami(session)).toBeTruthy();
+
+    // The operator removes the domain — or loses the configuration entirely.
+    allowed.clear();
+
+    await expect(svc.whoami(session)).rejects.toThrow(AuthError);
+    // token() mints fleet credentials, including long-lived v1 API keys whose
+    // expiry is independent of the 24h session.
+    await expect(svc.token({ sessionToken: session, app: "tenants" })).rejects.toThrow(AuthError);
+  });
+});
+
+describe("misconfiguration is not reported as a caller error", () => {
+  test("signup and resend answer 503, not 400, when the allowlist is unconfigured", async () => {
+    const svc = new AuthService({
+      store: new FakeIdpStore(), signingSecret: "test-secret", apiKeysTable: "api_keys",
+    });
+    for (const call of [
+      () => svc.signup({ email: "not-an-email", name: "X" }),
+      () => svc.resend({ email: "not-an-email" }),
+      () => svc.signup({ email: "", name: "X" }),
+    ]) {
+      const err = await call().catch((e) => e);
+      expect(err).toBeInstanceOf(AuthError);
+      expect((err as AuthError).status).toBe(503);
+      expect((err as AuthError).code).toBe("email_allowlist_not_configured");
+    }
+  });
+});

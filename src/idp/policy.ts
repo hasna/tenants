@@ -112,8 +112,12 @@ export function emailPolicyFromEnv(env: NodeJS.ProcessEnv = process.env): EmailP
     .split(",")
     .map((d) => d.trim().toLowerCase())
     .filter(Boolean);
+  // If BOTH are set, the ALLOWLIST wins. A stale `DISABLE=1` left in a shared
+  // env file must not silently void an allowlist an operator just configured —
+  // they would believe the door is shut while it stands open.
+  const disable = disabled && configured.length === 0;
   return {
-    allowedDomains: disabled ? null : new Set(configured),
+    allowedDomains: disable ? null : new Set(configured),
     requireConfirmation: env[REQUIRE_EMAIL_CONFIRMATION_ENV] !== "0",
   };
 }
