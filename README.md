@@ -107,7 +107,11 @@ file list from `npm pack --dry-run --json` and scans the content of every file
 npm would publish for owned domain literals, internal hosts and credential
 patterns. Source-level checks are not sufficient: a published bundle can contain
 strings that no reviewer sees in `src/`. The same check runs from the `prepack`
-lifecycle hook, so `npm publish` cannot skip it.
+lifecycle hook, so `npm publish` and `bun publish` both run it.
+
+One residual gap, stated plainly: `npm publish --ignore-scripts` skips every
+lifecycle hook, this one included, and no package.json setting can prevent that.
+Release through `bun run verify:release`.
 
 ## License
 

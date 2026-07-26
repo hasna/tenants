@@ -30,6 +30,11 @@
  * bundle — and every routine variant of it, not an adversary hiding data on
  * purpose. Binary files are listed but not scanned.
  *
+ * `npm publish --ignore-scripts` skips ALL lifecycle hooks, this one included.
+ * No package.json setting can defeat that flag; closing it needs a publish path
+ * that runs `verify:release` (CI, or a release script). Publish through
+ * `bun run verify:release` rather than reaching for `--ignore-scripts`.
+ *
  * Exit codes: 0 clean · 1 violations found · 2 the guard could not run.
  */
 
