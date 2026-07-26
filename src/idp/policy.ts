@@ -1,56 +1,55 @@
-// Login front-door policy for the fleet IdP: the email-domain allowlist.
+// Login front-door policy for the IdP: the email-domain allowlist.
 //
-// Signup AND login are restricted to the hasna-branded email domains
-// (`hasna.xyz` + every `hasna.<tld>` we own). This is the org boundary for the
-// internal fleet — a random `@gmail.com` address can neither sign up nor log in.
+// Signup AND login are both gated on the caller's email domain — this is the
+// org boundary of a deployment, so an address outside the allowlist can neither
+// create an account nor sign in.
 //
-// The allowlist is CONFIG-DRIVEN. Operators override it (comma-separated, exact
-// domains) via `HASNA_TENANTS_ALLOWED_EMAIL_DOMAINS`; when that env is unset
-// the built-in default below is used. The default was discovered from the live
-// domains portfolio (https://domains.hasna.xyz/v1) on 2026-07-13: every ACTIVE
-// `hasna.<tld>` apex (177 domains). Matching is EXACT (never a suffix/pattern)
-// so `hasna.attacker.com` — a subdomain of someone else's domain — is rejected.
-
-/**
- * Built-in default allowlist: the hasna-branded apex domains from the live
- * domains portfolio (ACTIVE `hasna.<tld>`, snapshot 2026-07-13). `hasna.xyz` is
- * guaranteed present. Refreshable from the domains API; overridable via env.
- */
-export const DEFAULT_ALLOWED_EMAIL_DOMAINS: readonly string[] = [
-  "hasna.academy", "hasna.agency", "hasna.ai", "hasna.app", "hasna.army", "hasna.art",
-  "hasna.asia", "hasna.autos", "hasna.band", "hasna.best", "hasna.bio", "hasna.blog",
-  "hasna.builders", "hasna.business", "hasna.cafe", "hasna.camp", "hasna.capital", "hasna.care",
-  "hasna.career", "hasna.careers", "hasna.cash", "hasna.cc", "hasna.center", "hasna.charity",
-  "hasna.chat", "hasna.city", "hasna.clinic", "hasna.clothing", "hasna.cloud", "hasna.club",
-  "hasna.co.uk", "hasna.coach", "hasna.codes", "hasna.coffee", "hasna.com", "hasna.community",
-  "hasna.company", "hasna.computer", "hasna.construction", "hasna.consulting", "hasna.contact",
-  "hasna.cool", "hasna.day", "hasna.deals", "hasna.delivery", "hasna.dev", "hasna.digital",
-  "hasna.dog", "hasna.domains", "hasna.earth", "hasna.eco", "hasna.education", "hasna.email",
-  "hasna.energy", "hasna.engineering", "hasna.enterprises", "hasna.estate", "hasna.events",
-  "hasna.exchange", "hasna.expert", "hasna.express", "hasna.family", "hasna.fan", "hasna.fans",
-  "hasna.farm", "hasna.finance", "hasna.financial", "hasna.fit", "hasna.fitness", "hasna.food",
-  "hasna.football", "hasna.foundation", "hasna.fund", "hasna.gallery", "hasna.games",
-  "hasna.global", "hasna.gold", "hasna.green", "hasna.group", "hasna.guide", "hasna.guru",
-  "hasna.health", "hasna.healthcare", "hasna.holdings", "hasna.homes", "hasna.hospital",
-  "hasna.hosting", "hasna.house", "hasna.how", "hasna.industries", "hasna.info", "hasna.ink",
-  "hasna.institute", "hasna.international", "hasna.investments", "hasna.irish", "hasna.land",
-  "hasna.legal", "hasna.life", "hasna.lifestyle", "hasna.live", "hasna.living", "hasna.llc",
-  "hasna.loans", "hasna.love", "hasna.ltd", "hasna.luxury", "hasna.management", "hasna.market",
-  "hasna.marketing", "hasna.mba", "hasna.md", "hasna.media", "hasna.mobi", "hasna.money",
-  "hasna.net", "hasna.network", "hasna.news", "hasna.ngo", "hasna.ninja", "hasna.one",
-  "hasna.ooo", "hasna.page", "hasna.partners", "hasna.place", "hasna.plus", "hasna.pro",
-  "hasna.productions", "hasna.properties", "hasna.quest", "hasna.red", "hasna.rentals",
-  "hasna.review", "hasna.reviews", "hasna.rocks", "hasna.run", "hasna.sale", "hasna.school",
-  "hasna.science", "hasna.services", "hasna.shopping", "hasna.show", "hasna.social",
-  "hasna.software", "hasna.solar", "hasna.solutions", "hasna.space", "hasna.store",
-  "hasna.studio", "hasna.supply", "hasna.support", "hasna.systems", "hasna.tax", "hasna.team",
-  "hasna.tech", "hasna.technology", "hasna.today", "hasna.tools", "hasna.toys", "hasna.trade",
-  "hasna.tv", "hasna.university", "hasna.us", "hasna.vc", "hasna.ventures", "hasna.vip",
-  "hasna.vision", "hasna.website", "hasna.wiki", "hasna.win", "hasna.work", "hasna.works",
-  "hasna.world", "hasna.ws", "hasna.wtf", "hasna.xyz", "hasna.zone",
-];
+// The allowlist is CONFIG-DRIVEN and has NO built-in default. Operators supply
+// it (comma-separated, exact domains) via `HASNA_TENANTS_ALLOWED_EMAIL_DOMAINS`.
+// A built-in default would bake one deployment's domain portfolio into every
+// published artifact, so this file ships none.
+//
+// Two properties this file exists to guarantee:
+//
+//  1. FAIL CLOSED. An unset or empty allowlist permits NOTHING. It is treated as
+//     "the front door is not configured" and every signup/login is rejected with
+//     an error naming the env var to set. It must never degrade into "allow
+//     everything": an operator who forgets the variable gets an outage, which is
+//     noisy and recoverable, instead of an open front door, which is silent and
+//     not. Turning the check off is possible, but only through a separate,
+//     explicitly-named opt-out (`HASNA_TENANTS_DISABLE_EMAIL_ALLOWLIST=1`) that
+//     no one sets by accident.
+//
+//  2. EXACT match, never a suffix or substring match. Comparing the whole
+//     lowercased domain against a Set is the only form with no bypass:
+//       - `domain.endsWith("example.com")` also admits `notexample.com` — an
+//         attacker just registers a domain whose name ENDS with the allowed one.
+//       - `domain.includes("example.com")` also admits
+//         `example.com.attacker.net`, a domain the attacker fully controls.
+//     Subdomains are likewise not implied: `mail.example.com` is allowed only if
+//     it is itself listed.
 
 export const ALLOWED_EMAIL_DOMAINS_ENV = "HASNA_TENANTS_ALLOWED_EMAIL_DOMAINS";
+export const DISABLE_EMAIL_ALLOWLIST_ENV = "HASNA_TENANTS_DISABLE_EMAIL_ALLOWLIST";
+export const REQUIRE_EMAIL_CONFIRMATION_ENV = "HASNA_TENANTS_REQUIRE_EMAIL_CONFIRMATION";
+
+/**
+ * Operator-facing message for the fail-closed state. It names the variable to
+ * set but never enumerates configured domains — this text reaches unauthenticated
+ * callers of `/signup` and `/login`.
+ */
+export const ALLOWLIST_NOT_CONFIGURED_MESSAGE =
+  `Sign-up and sign-in are disabled: no email-domain allowlist is configured. Set ` +
+  `${ALLOWED_EMAIL_DOMAINS_ENV} to a comma-separated list of exact domains (or set ` +
+  `${DISABLE_EMAIL_ALLOWLIST_ENV}=1 to deliberately accept every domain).`;
+
+/**
+ * Rejection message for a domain that is simply not on the list. Deliberately
+ * generic: an unauthenticated caller must not be able to enumerate the allowed
+ * domains by probing this endpoint.
+ */
+export const DOMAIN_NOT_ALLOWED_MESSAGE =
+  "This email domain is not permitted to sign up or sign in.";
 
 /** Extract the lowercased domain part of an email, or null when malformed. */
 export function emailDomain(email: string): string | null {
@@ -63,8 +62,11 @@ export function emailDomain(email: string): string | null {
 
 export interface EmailPolicy {
   /**
-   * Exact-match allowlist of permitted email domains. `null` DISABLES the check
-   * (allow any) — used only by tests/local; production always sets a Set.
+   * Exact-match allowlist of permitted email domains.
+   * - non-empty Set — only these exact domains may sign up / sign in.
+   * - EMPTY Set — nothing is permitted (fail closed: front door unconfigured).
+   * - `null` — the check is DISABLED and every domain is accepted. Reachable
+   *   only by an explicit opt-out; never the result of missing configuration.
    */
   allowedDomains: Set<string> | null;
   /** Require email confirmation before a session/token is minted. */
@@ -72,27 +74,72 @@ export interface EmailPolicy {
 }
 
 /**
+ * The fail-closed default: an empty allowlist, which permits no one. Returned as
+ * a fresh object so a caller mutating its Set cannot open the door process-wide.
+ */
+export function denyAllEmailPolicy(): EmailPolicy {
+  return { allowedDomains: new Set<string>(), requireConfirmation: true };
+}
+
+/**
+ * Explicit "no gate at all" policy for local development and tests. Named so it
+ * is obvious in review that a call site has turned the front door off; nothing
+ * produces this by default.
+ */
+export const UNRESTRICTED_EMAIL_POLICY: EmailPolicy = Object.freeze({
+  allowedDomains: null,
+  requireConfirmation: false,
+});
+
+export interface EmailDomainDenial {
+  /** HTTP status the caller should receive. */
+  status: number;
+  code: "email_allowlist_not_configured" | "email_domain_not_allowed" | "invalid_email";
+  message: string;
+}
+
+/**
  * Build the email policy from the environment.
- * - `HASNA_TENANTS_ALLOWED_EMAIL_DOMAINS` (comma list) overrides the default.
- * - `HASNA_TENANTS_DISABLE_EMAIL_ALLOWLIST=1` fully disables it (escape hatch).
- * - `HASNA_TENANTS_REQUIRE_EMAIL_CONFIRMATION=0` disables confirmation gating.
+ * - `HASNA_TENANTS_ALLOWED_EMAIL_DOMAINS` — comma-separated exact domains. Unset
+ *   or empty yields an EMPTY allowlist, which denies everything (fail closed).
+ * - `HASNA_TENANTS_DISABLE_EMAIL_ALLOWLIST=1` — explicit opt-out; disables the
+ *   check entirely (local/dev only).
+ * - `HASNA_TENANTS_REQUIRE_EMAIL_CONFIRMATION=0` — disables confirmation gating.
  */
 export function emailPolicyFromEnv(env: NodeJS.ProcessEnv = process.env): EmailPolicy {
-  const disabled = env["HASNA_TENANTS_DISABLE_EMAIL_ALLOWLIST"] === "1";
-  const override = (env[ALLOWED_EMAIL_DOMAINS_ENV] ?? "").trim();
-  const domains = override
-    ? override.split(",").map((d) => d.trim().toLowerCase()).filter(Boolean)
-    : [...DEFAULT_ALLOWED_EMAIL_DOMAINS];
+  const disabled = env[DISABLE_EMAIL_ALLOWLIST_ENV] === "1";
+  const configured = (env[ALLOWED_EMAIL_DOMAINS_ENV] ?? "")
+    .split(",")
+    .map((d) => d.trim().toLowerCase())
+    .filter(Boolean);
   return {
-    allowedDomains: disabled ? null : new Set(domains),
-    requireConfirmation: env["HASNA_TENANTS_REQUIRE_EMAIL_CONFIRMATION"] !== "0",
+    allowedDomains: disabled ? null : new Set(configured),
+    requireConfirmation: env[REQUIRE_EMAIL_CONFIRMATION_ENV] !== "0",
   };
+}
+
+/**
+ * Decide whether `email` may use the front door. Returns `null` when it may, or
+ * the denial to surface otherwise.
+ *
+ * The unconfigured-allowlist case is checked FIRST and independently of the
+ * address, so a deployment missing its configuration always reports that fact
+ * rather than blaming the caller's email.
+ */
+export function checkEmailDomain(email: string, policy: EmailPolicy): EmailDomainDenial | null {
+  if (policy.allowedDomains === null) return null; // explicitly disabled
+  if (policy.allowedDomains.size === 0) {
+    return { status: 503, code: "email_allowlist_not_configured", message: ALLOWLIST_NOT_CONFIGURED_MESSAGE };
+  }
+  const domain = emailDomain(email);
+  if (!domain) return { status: 400, code: "invalid_email", message: "A valid email address is required." };
+  if (!policy.allowedDomains.has(domain)) {
+    return { status: 403, code: "email_domain_not_allowed", message: DOMAIN_NOT_ALLOWED_MESSAGE };
+  }
+  return null;
 }
 
 /** True when `email`'s domain is permitted by the policy (or the policy is off). */
 export function isEmailDomainAllowed(email: string, policy: EmailPolicy): boolean {
-  if (!policy.allowedDomains) return true;
-  const domain = emailDomain(email);
-  if (!domain) return false;
-  return policy.allowedDomains.has(domain);
+  return checkEmailDomain(email, policy) === null;
 }

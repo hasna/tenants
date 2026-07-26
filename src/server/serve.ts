@@ -24,7 +24,7 @@ import { AuthService, AuthError } from "../idp/service.js";
 import { verifyAccessToken, looksLikeAccessToken, type JwkPublic } from "../idp/tokens.js";
 import { API_KEYS_TABLE } from "../migrations.js";
 import { emailPolicyFromEnv } from "../idp/policy.js";
-import { createMailerFromEnv, confirmUrlBaseFromEnv } from "../idp/mailer.js";
+import { resolveEmailDeliveryFromEnv } from "../idp/mailer.js";
 
 export const TENANTS_SERVE_APP = "tenants";
 const DEFAULT_PORT = 15460;
@@ -279,9 +279,10 @@ export async function buildHandler(options: ServeOptions = {}): Promise<Handler>
     apiKeys: keys,
     otpEcho: process.env["HASNA_TENANTS_OTP_ECHO"] === "1",
     // Login front door: email allowlist + confirmation gate + SES delivery.
+    // Both are config-driven with no built-in defaults; an unconfigured
+    // allowlist denies every signup/login rather than admitting everyone.
     emailPolicy: emailPolicyFromEnv(),
-    mailer: createMailerFromEnv(),
-    confirmUrlBase: confirmUrlBaseFromEnv(),
+    ...resolveEmailDeliveryFromEnv(),
   });
 
   // Short-TTL JWKS cache so verification is a hot-path memory read, not a DB hit
