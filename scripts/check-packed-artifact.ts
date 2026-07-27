@@ -41,9 +41,9 @@
  * Exit codes: 0 clean · 1 violations found · 2 the guard could not run.
  */
 
-import { spawnSync } from "node:child_process";
-import { readFileSync, existsSync } from "node:fs";
-import { resolve } from "node:path";
+import { readFileSync, existsSync, mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
 
 // ── what counts as ours ──────────────────────────────────────────────────────
 
@@ -303,24 +303,48 @@ export interface PackedFile {
  * without it the nested pack would re-enter the guard forever.
  */
 export function listPackedFiles(cwd: string): PackedFile[] {
-  const result = spawnSync("npm", ["pack", "--dry-run", "--json", "--ignore-scripts"], {
-    cwd,
-    encoding: "utf8",
-    maxBuffer: 64 * 1024 * 1024,
-    // Recursion marker for the CHILD only. If `--ignore-scripts` ever stops
-    // suppressing the prepack hook, the nested guard sees this and exits 2 — a
-    // loud failure instead of an infinite loop. It is never read from the
-    // ambient parent environment, so it cannot serve as a kill switch.
-    env: { ...process.env, TENANTS_PACK_GUARD_ACTIVE: "1" },
-  });
-  if (result.error) throw new Error(`could not run \`npm pack\`: ${result.error.message}`);
-  if (result.status !== 0) {
-    throw new Error(`\`npm pack --dry-run\` failed (exit ${result.status}):\n${result.stderr ?? ""}`);
+  const npmStateDir = mkdtempSync(join(tmpdir(), "tenants-pack-npm-"));
+  let status: number;
+  let stdout: string;
+  let stderr: string;
+  try {
+    const result = Bun.spawnSync(["npm", "pack", "--dry-run", "--json", "--ignore-scripts"], {
+      cwd,
+      stdout: "pipe",
+      stderr: "pipe",
+      // Recursion marker for the CHILD only. If `--ignore-scripts` ever stops
+      // suppressing the prepack hook, the nested guard sees this and exits 2 — a
+      // loud failure instead of an infinite loop. It is never read from the
+      // ambient parent environment, so it cannot serve as a kill switch.
+      //
+      // npm 11 writes cache/log state even for dry-run packs. Point that state at
+      // a disposable temp directory so this release guard works in read-only-home
+      // sandboxes and CI containers.
+      env: {
+        ...process.env,
+        TENANTS_PACK_GUARD_ACTIVE: "1",
+        npm_config_cache: npmStateDir,
+        npm_config_logs_dir: join(npmStateDir, "logs"),
+        npm_config_audit: "false",
+        npm_config_fund: "false",
+        npm_config_update_notifier: "false",
+      },
+    });
+    status = result.exitCode;
+    stdout = new TextDecoder().decode(result.stdout);
+    stderr = new TextDecoder().decode(result.stderr);
+  } catch (error) {
+    throw new Error(`could not run \`npm pack\`: ${error instanceof Error ? error.message : String(error)}`);
+  } finally {
+    rmSync(npmStateDir, { recursive: true, force: true });
   }
-  const stdout = (result.stdout ?? "").trim();
-  const start = stdout.indexOf("[");
-  if (start === -1) throw new Error(`\`npm pack --dry-run --json\` produced no JSON:\n${stdout}`);
-  const parsed = JSON.parse(stdout.slice(start)) as Array<{ files?: PackedFile[] }>;
+  if (status !== 0) {
+    throw new Error(`\`npm pack --dry-run\` failed (exit ${status}):\n${stderr}`);
+  }
+  const output = stdout.trim();
+  const start = output.indexOf("[");
+  if (start === -1) throw new Error(`\`npm pack --dry-run --json\` produced no JSON:\n${output}`);
+  const parsed = JSON.parse(output.slice(start)) as Array<{ files?: PackedFile[] }>;
   const files = parsed[0]?.files;
   if (!files?.length) throw new Error("`npm pack --dry-run --json` reported no files");
   return files;

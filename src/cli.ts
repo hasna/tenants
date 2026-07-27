@@ -1,11 +1,12 @@
 #!/usr/bin/env bun
 // CLI for @hasna/tenants — a thin client over the tenant-auth / IdP HTTP API.
 //
-// Every command talks directly to the HTTPS API at HASNA_TENANTS_API_URL.
+// Every command talks directly to the HTTP API at HASNA_TENANTS_API_URL.
 // signup/login/verify/resend/jwks are unauthenticated; token/whoami/introspect
-// use the returned session (or an api key) as a Bearer credential.
+// use the returned session as a Bearer credential or an API key as x-api-key.
 
 import { getPackageVersion } from "./version.js";
+import { ApiError, TenantsClient, type LoginInput, type SignupInput, type TokenInput } from "./sdk/client.js";
 
 interface ParsedArgs {
   positionals: string[];
@@ -25,6 +26,7 @@ Commands:
   auth signup --email <e> [--name <n>] [--org <org>] [--password <pw>]
   auth login  --email <e> [--password <pw>]        (no password -> OTP challenge)
   auth verify --email <e> --code <code>            (confirm signup / complete an OTP challenge)
+  auth confirm --email <e> --code <code>           (confirm signup via the one-click-link API route)
   auth resend --email <e>                          (re-send an email confirmation code)
   auth token  --session <s> --app <app> [--scope a --scope b] [--tenant <id>] [--ttl <seconds>]
   auth revoke --session <s> --jti <jti>            (deny-list an issued token before its expiry)
@@ -37,6 +39,23 @@ Sign-up and login are limited to the email domains the server allows; signup req
 email confirmation. Requires HASNA_TENANTS_API_URL (the tenants API base URL). Session
 tokens are returned by verify/login (after confirmation).
 `;
+
+const authHelpText = `tenants auth — fleet tenant-auth / IdP client
+
+  auth signup --email <e> [--name <n>] [--org <org>] [--password <pw>]
+  auth login  --email <e> [--password <pw>]        (no password -> OTP challenge)
+  auth verify --email <e> --code <code>            (confirm signup / complete an OTP challenge)
+  auth confirm --email <e> --code <code>           (confirm signup via the one-click-link API route)
+  auth resend --email <e>                          (re-send an email confirmation code)
+  auth token  --session <s> --app <app> [--scope a --scope b] [--tenant <id>] [--ttl <seconds>]
+  auth revoke --session <s> --jti <jti>            (deny-list an issued token before its expiry)
+  auth whoami --session <s>
+  auth jwks
+  auth introspect --kid <kid> --session <s>|--key <apiKey>
+
+Sign-up and login are limited to the email domains the server allows; signup requires
+email confirmation. Requires HASNA_TENANTS_API_URL. Session tokens are returned by
+verify/login (after confirmation).`;
 
 export async function runCli(argv = process.argv.slice(2)): Promise<void> {
   const parsed = parseArgs(argv);
@@ -77,57 +96,34 @@ async function dispatch(parsed: ParsedArgs, json: boolean): Promise<void> {
 
 async function dispatchAuth(rest: string[], parsed: ParsedArgs, json: boolean): Promise<void> {
   const [subcommand] = rest;
-  const apiUrl = (process.env["HASNA_TENANTS_API_URL"] ?? "").replace(/\/+$/, "");
-  if (!apiUrl && subcommand !== "help") {
-    throw new Error("Set HASNA_TENANTS_API_URL to the tenants API base URL (e.g. https://auth.example.com).");
-  }
-
-  const call = async (method: string, path: string, body?: unknown, session?: string): Promise<unknown> => {
-    const headers: Record<string, string> = { Accept: "application/json" };
-    if (body !== undefined) headers["Content-Type"] = "application/json";
-    if (session) headers["Authorization"] = `Bearer ${session}`;
-    const res = await fetch(`${apiUrl}${path}`, { method, headers, body: body === undefined ? undefined : JSON.stringify(body) });
-    const text = await res.text();
-    const data = text ? (() => { try { return JSON.parse(text); } catch { return text; } })() : null;
-    if (!res.ok) throw new Error(`${method} ${path} -> ${res.status}: ${typeof data === "object" && data && "error" in data ? (data as any).error : text}`);
-    return data;
-  };
-
   if (!subcommand || subcommand === "help") {
-    output(`tenants auth — fleet tenant-auth / IdP client
-
-  auth signup --email <e> [--name <n>] [--org <org>] [--password <pw>]
-  auth login  --email <e> [--password <pw>]        (no password -> OTP challenge)
-  auth verify --email <e> --code <code>            (confirm signup / complete an OTP challenge)
-  auth resend --email <e>                          (re-send an email confirmation code)
-  auth token  --session <s> --app <app> [--scope a --scope b] [--tenant <id>] [--ttl <seconds>]
-  auth revoke --session <s> --jti <jti>            (deny-list an issued token before its expiry)
-  auth whoami --session <s>
-  auth jwks
-  auth introspect --kid <kid> --session <s>|--key <apiKey>
-
-Sign-up and login are limited to the email domains the server allows; signup requires
-email confirmation. Requires HASNA_TENANTS_API_URL. Session tokens are returned by
-verify/login (after confirmation).`, json);
+    output(authHelpText, json);
     return;
   }
 
+  const apiUrl = (process.env["HASNA_TENANTS_API_URL"] ?? "").replace(/\/+$/, "");
+  if (!apiUrl) {
+    throw new Error("Set HASNA_TENANTS_API_URL to the tenants API base URL (e.g. https://auth.example.com).");
+  }
+  const client = new TenantsClient({ baseUrl: apiUrl });
+  const bearer = (token: string): RequestInit => ({ headers: { Authorization: `Bearer ${token}` } });
+
   if (subcommand === "jwks") {
-    output(await call("GET", "/v1/.well-known/jwks.json"), true);
+    output(await client.getJwks(), true);
     return;
   }
   if (subcommand === "signup") {
-    const body: Record<string, unknown> = { email: required(flagValue(parsed, "email"), "auth signup requires --email") };
+    const body: SignupInput = { email: required(flagValue(parsed, "email"), "auth signup requires --email") };
     if (flagValue(parsed, "name")) body["name"] = flagValue(parsed, "name");
     if (flagValue(parsed, "org")) body["org_name"] = flagValue(parsed, "org");
     if (flagValue(parsed, "password")) body["password"] = flagValue(parsed, "password");
-    output(await call("POST", "/v1/auth/signup", body), true);
+    output(await client.signup(body), true);
     return;
   }
   if (subcommand === "login") {
-    const body: Record<string, unknown> = { email: required(flagValue(parsed, "email"), "auth login requires --email") };
+    const body: LoginInput = { email: required(flagValue(parsed, "email"), "auth login requires --email") };
     if (flagValue(parsed, "password")) body["password"] = flagValue(parsed, "password");
-    output(await call("POST", "/v1/auth/login", body), true);
+    output(await client.login(body), true);
     return;
   }
   if (subcommand === "verify") {
@@ -135,40 +131,52 @@ verify/login (after confirmation).`, json);
       email: required(flagValue(parsed, "email"), "auth verify requires --email"),
       code: required(flagValue(parsed, "code"), "auth verify requires --code"),
     };
-    output(await call("POST", "/v1/auth/verify", body), true);
+    output(await client.verifyOtp(body), true);
+    return;
+  }
+  if (subcommand === "confirm") {
+    const query = {
+      email: required(flagValue(parsed, "email"), "auth confirm requires --email"),
+      code: required(flagValue(parsed, "code"), "auth confirm requires --code"),
+    };
+    output(await client.confirm(query), true);
     return;
   }
   if (subcommand === "resend") {
     const body = { email: required(flagValue(parsed, "email"), "auth resend requires --email") };
-    output(await call("POST", "/v1/auth/resend", body), true);
+    output(await client.resendConfirmation(body), true);
     return;
   }
   if (subcommand === "token") {
     const session = required(flagValue(parsed, "session"), "auth token requires --session");
-    const body: Record<string, unknown> = { app: required(flagValue(parsed, "app"), "auth token requires --app") };
+    const body: TokenInput = { app: required(flagValue(parsed, "app"), "auth token requires --app") };
     const scopes = flagValues(parsed, "scope");
     if (scopes.length > 0) body["scopes"] = scopes;
     if (flagValue(parsed, "tenant")) body["tenant_id"] = flagValue(parsed, "tenant");
     // Server-bounded: values above the 24h ceiling are clamped by the API.
     if (flagValue(parsed, "ttl")) body["ttlSeconds"] = Number(flagValue(parsed, "ttl"));
-    output(await call("POST", "/v1/auth/token", body, session), true);
+    output(await client.issueToken(body, bearer(session)), true);
     return;
   }
   if (subcommand === "revoke") {
     const session = required(flagValue(parsed, "session"), "auth revoke requires --session");
     const body = { jti: required(flagValue(parsed, "jti"), "auth revoke requires --jti") };
-    output(await call("POST", "/v1/auth/revoke", body, session), true);
+    output(await client.revokeToken(body, bearer(session)), true);
     return;
   }
   if (subcommand === "whoami") {
     const session = required(flagValue(parsed, "session"), "auth whoami requires --session");
-    output(await call("GET", "/v1/auth/whoami", undefined, session), true);
+    output(await client.whoami(bearer(session)), true);
     return;
   }
   if (subcommand === "introspect") {
     const kid = required(flagValue(parsed, "kid"), "auth introspect requires --kid");
-    const bearer = flagValue(parsed, "session") ?? flagValue(parsed, "key");
-    output(await call("GET", `/v1/introspect?kid=${encodeURIComponent(kid)}`, undefined, bearer), true);
+    const session = flagValue(parsed, "session");
+    const key = flagValue(parsed, "key");
+    if (!session && !key) throw new Error("auth introspect requires --session or --key");
+    if (session && key) throw new Error("auth introspect accepts only one of --session or --key");
+    const introspectClient = key ? new TenantsClient({ baseUrl: apiUrl, apiKey: key }) : client;
+    output(await introspectClient.introspect({ kid }, session ? bearer(session) : undefined), true);
     return;
   }
   throw new Error(`Unknown auth command: ${subcommand}`);
@@ -222,6 +230,12 @@ function output(data: unknown, json: boolean): void {
 }
 
 function errorMessage(error: unknown): string {
+  if (error instanceof ApiError) {
+    const body = error.body;
+    if (body && typeof body === "object" && "error" in body) {
+      return `${error.message}: ${String((body as any).error)}`;
+    }
+  }
   return error instanceof Error ? error.message : String(error);
 }
 
