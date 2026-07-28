@@ -33,9 +33,18 @@ Options:
   --host <host>   Host to bind (default: $HOST or 0.0.0.0)
 
 Environment:
-  HASNA_TENANTS_STORAGE_MODE=cloud        Required (PURE REMOTE)
-  HASNA_TENANTS_DATABASE_URL=postgres://  Required in cloud mode
-  HASNA_TENANTS_API_SIGNING_KEY=<hmac>    API-key signing secret (or HASNA_API_SIGNING_KEY)`);
+  HASNA_TENANTS_STORAGE_MODE=cloud            Required (PURE REMOTE)
+  HASNA_TENANTS_DATABASE_URL=postgres://...   Required Postgres URL
+  HASNA_TENANTS_API_SIGNING_KEY=<hmac>        Required (or HASNA_API_SIGNING_KEY)
+  HASNA_TENANTS_ALLOWED_EMAIL_DOMAINS=<list>  Exact domains; unset denies all auth
+  HASNA_TENANTS_DISABLE_EMAIL_ALLOWLIST=1     Explicit local/dev opt-out
+  HASNA_TENANTS_REQUIRE_EMAIL_CONFIRMATION=0  Disable confirmation gate
+  HASNA_TENANTS_EMAIL_ENABLED=1               Enable direct Amazon SES delivery
+  HASNA_TENANTS_MAIL_FROM=<sender>            Required when email is enabled
+  HASNA_TENANTS_CONFIRM_URL_BASE=<url>         Required when email is enabled
+  HASNA_TENANTS_JWT_SIGNING_KEY=<private-jwk>  Optional JSON/base64url Ed25519 JWK
+
+See docs/configuration.md for SES, AWS credentials, TLS, and developer settings.`);
 }
 
 async function migrate(): Promise<void> {

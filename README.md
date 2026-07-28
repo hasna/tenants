@@ -1,123 +1,179 @@
 # @hasna/tenants
 
-**Hasna fleet tenant auth / IdP.** The login front door and identity provider for
-the Hasna fleet: **tenants, users, memberships, service principals, sessions +
-OTP/password login**, and asymmetric **EdDSA fleet-token issuance** with a
-published **JWKS**. Apps across the fleet verify tenants-issued access tokens
-offline against that JWKS.
+**Hasna fleet tenant auth / IdP.** This package owns tenants, users,
+memberships, service principals, sessions, OTP/password login, Ed25519 access
+tokens, and the public JWKS used to verify those tokens.
 
-> **Not to be confused with [`@hasna/identities`](https://www.npmjs.com/package/@hasna/identities).**
-> `@hasna/identities` (a.k.a. *open-identities*) is the separate, healthy
-> **agent-identity registry** (identity records for humans/agents, personas,
-> roster, browser-plan slots). **`@hasna/tenants` is the tenant-auth / IdP
-> service** and shares no code with the registry — the two domains are
-> intentionally decoupled. This package was extracted from the tenant-auth work
-> that had been built as a fork of the registry.
+It is separate from `@hasna/identities`, the agent-identity registry. Tenants is
+the authentication and tenancy authority; it does not contain the identities
+document store or identity CRUD API.
 
-## What it does
+## What It Does
 
-- **Tenancy** — a fixed root tenant plus brand children (deterministic UUIDs),
-  and org tenants created on signup.
-- **Users & principals** — human/agent users and machine service principals,
-  each with tenant memberships and roles.
-- **Login front door** — signup / login restricted to an operator-configured
-  allowlist of email domains (exact match, no built-in default: an unconfigured
-  allowlist denies everyone), with an email-confirmation gate (OTP + one-click
-  link) delivered via Amazon SES.
-- **Sessions & tokens** — password/OTP sessions, and per-app fleet access tokens
-  (EdDSA JWS) minted from a session, scoped by membership role. Token TTL is
-  server-bounded (24h ceiling — callers can only shorten it), and every minted
-  `jti` is registered so a token can be revoked before its expiry
-  (`POST /v1/auth/revoke`; the serve layer checks the denylist on verify).
-- **JWKS** — a published `/.well-known/jwks.json` so every app verifies tokens
-  offline. Keys are generated + persisted in the app's own Postgres (or injected
-  via Secrets Manager).
-- **API-key bridge** — issued keys are bound to a tenant/user and introspectable
-  by `kid`. Introspection is tenant-scoped: bindings outside the caller's own
-  tenant read as `active:false`.
+- Seeds a deterministic fleet root tenant and brand tenants; signup can create
+  or join an organization tenant.
+- Restricts signup, login, OTP verification, and session-authenticated actions
+  to an exact-match email-domain allowlist that fails closed when unconfigured.
+- Requires email confirmation by default and can deliver signup/login OTPs and
+  one-click links directly through Amazon SES.
+- Issues 24-hour sessions and per-app EdDSA access tokens. Membership roles set
+  the scope ceiling, while callers may request narrower scopes and shorter TTLs.
+- Publishes Ed25519 public keys as JWKS. Signing keys can be injected through the
+  environment or generated once and persisted in Postgres.
+- Registers every access-token `jti` for owner-scoped early revocation. The
+  tenants HTTP service checks this denylist; offline JWKS consumers cannot see
+  revocations and may accept a revoked token until its bounded expiry.
+- Optionally returns a transitional HMAC API key when minting a token for the
+  `tenants` audience. Those keys carry tenant/user bindings that can be queried
+  through tenant-scoped introspection.
+
+## Install
+
+```bash
+bun add @hasna/tenants
+```
+
+The package requires Bun 1.0 or newer. Running the service also requires a
+Postgres database and `HASNA_TENANTS_STORAGE_MODE=cloud`; there is no local
+database implementation in this package.
 
 ## Surfaces
 
 | Surface | Entry |
 | --- | --- |
-| HTTP API | `tenants-serve` (`src/server/index.ts`) — Bun.serve, cloud/PURE REMOTE |
-| CLI | `tenants` (`src/cli.ts`) — thin client over the HTTP API |
-| SDK | `@hasna/tenants/sdk` (`TenantsClient`) |
-| Library | `@hasna/tenants` (`AuthService`, `IdpStore`, tokens, migrations, …) |
+| HTTP API | `tenants-serve` — Bun HTTP service in cloud/PURE REMOTE mode |
+| CLI | `tenants` — thin client over the HTTP API |
+| SDK | `@hasna/tenants/sdk` — `TenantsClient` |
+| Library | `@hasna/tenants` — auth service, store, tokens, server helpers, and migrations |
+| Database | `@hasna/tenants/db` and `@hasna/tenants/migrations` |
 
-### HTTP routes
+## Quick Start
 
+Apply migrations and the idempotent seed/backfill:
+
+```bash
+export HASNA_TENANTS_STORAGE_MODE=cloud
+export HASNA_TENANTS_DATABASE_URL='postgres://user:password@localhost:5432/tenants'
+export HASNA_TENANTS_API_SIGNING_KEY="$(openssl rand -hex 32)"
+export HASNA_TENANTS_ALLOWED_EMAIL_DOMAINS='example.com'
+export HASNA_TENANTS_OTP_ECHO=1 # development only; returns dev_code
+
+tenants-serve migrate
+tenants-serve --port 15460
 ```
-GET  /health | /version | /ready | /openapi.json
-GET  /jwks | /v1/.well-known/jwks.json          (public)
-POST /signup | /v1/auth/signup                  (public)
-POST /login  | /v1/auth/login                   (public)
-POST /v1/auth/verify | /v1/auth/resend          (public)
-GET  /v1/auth/confirm                            (public, one-click)
-POST /v1/auth/token                              (Bearer session)
-POST /v1/auth/revoke                             (Bearer session, owner-scoped)
-GET  /v1/auth/whoami                             (Bearer session)
-GET  /v1/introspect?kid=…                        (API-key / access-token auth, tenant-scoped)
+
+In another shell, point the client at the service:
+
+```bash
+export HASNA_TENANTS_API_URL='http://127.0.0.1:15460'
+
+tenants auth signup --email user@example.com --password 'choose-a-password'
+tenants auth verify --email user@example.com --code 123456
+tenants auth token --session hst_… --app todos --scope todos:read
 ```
 
-## Configuration (cloud mode)
+Signup returns a challenge rather than a session while confirmation is enabled.
+Use the development-only `dev_code` (or the code received by email when SES is
+configured) with `auth verify`; `auth confirm` calls the same verification flow
+through the one-click-link GET route. Never enable OTP echo in production.
 
-| Env | Purpose |
+## CLI
+
+```text
+tenants [--json] <command>
+
+tenants auth signup --email <e> [--name <n>] [--org <org>] [--password <pw>]
+tenants auth login --email <e> [--password <pw>]
+tenants auth verify --email <e> --code <code>
+tenants auth confirm --email <e> --code <code>
+tenants auth resend --email <e>
+tenants auth token --session <s> --app <app> [--scope <scope>]... [--tenant <id>] [--ttl <seconds>]
+tenants auth revoke --session <s> --jti <jti>
+tenants auth whoami --session <s>
+tenants auth jwks
+tenants auth introspect --kid <kid> --key <access-token-or-api-key>
+tenants version
+```
+
+`auth introspect` does not accept a session. Mint a `tenants`-audience access
+token first, then pass its `access_token` as `--key`. See [CLI usage](docs/cli.md)
+for command behavior, output, and examples.
+
+## HTTP API
+
+Canonical application routes:
+
+```text
+GET  /v1/.well-known/jwks.json                    public
+POST /v1/auth/signup                             public
+POST /v1/auth/login                              public
+POST /v1/auth/verify                             public
+GET  /v1/auth/confirm?email=…&code=…              public
+POST /v1/auth/resend                             public
+POST /v1/auth/token                              Bearer session
+POST /v1/auth/revoke                             Bearer session
+GET  /v1/auth/whoami                             Bearer session
+GET  /v1/introspect?kid=…                        access token or API key
+```
+
+The service also exposes `/`, `/health`, `/ready`, `/version`, and
+`/openapi.json`. Compatibility aliases are available for `/signup`, `/login`,
+`/jwks`, and `/.well-known/jwks.json`. See [HTTP API](docs/http-api.md) for
+request shapes, authentication, roles, token behavior, and errors.
+
+## Configuration
+
+The minimum service configuration is:
+
+| Environment variable | Purpose |
 | --- | --- |
-| `HASNA_TENANTS_STORAGE_MODE=cloud` | Required (PURE REMOTE) |
+| `HASNA_TENANTS_STORAGE_MODE=cloud` | Select the only service storage mode |
 | `HASNA_TENANTS_DATABASE_URL` | Postgres connection string |
-| `HASNA_TENANTS_API_SIGNING_KEY` | HMAC signing secret (or `HASNA_API_SIGNING_KEY`) |
-| `HASNA_TENANTS_JWT_SIGNING_KEY` / `_JWT_KID` | Optional EdDSA private JWK (Secrets Manager path) |
-| `HASNA_TENANTS_ALLOWED_EMAIL_DOMAINS` | **Required.** Comma-separated exact email domains allowed to sign up / log in. There is no default — unset means nobody may sign up or log in |
-| `HASNA_TENANTS_DISABLE_EMAIL_ALLOWLIST=1` | Explicit opt-out: accept every email domain (local/dev only) |
-| `HASNA_TENANTS_EMAIL_ENABLED=1` | Enable SES confirmation email |
-| `HASNA_TENANTS_MAIL_FROM` | Required when email is enabled — DKIM-verified SES sender, e.g. `Example Auth <auth@auth.example.com>` |
-| `HASNA_TENANTS_CONFIRM_URL_BASE` | Required when email is enabled — public base URL for one-click confirmation links |
-| `HASNA_TENANTS_API_URL` | Base URL used by the `tenants` CLI |
+| `HASNA_TENANTS_API_SIGNING_KEY` | HMAC secret; `HASNA_API_SIGNING_KEY` is the fallback |
+| `HASNA_TENANTS_ALLOWED_EMAIL_DOMAINS` | Comma-separated exact domains; unset or empty denies all front-door activity |
 
-The email allowlist **fails closed**. An unset or empty
-`HASNA_TENANTS_ALLOWED_EMAIL_DOMAINS` rejects every signup and login with
-`503 email_allowlist_not_configured`, naming the variable to set. Missing
-configuration must never degrade into "allow every domain"; disabling the gate
-requires the separate, explicit `HASNA_TENANTS_DISABLE_EMAIL_ALLOWLIST=1`.
+Email delivery, signing-key injection, TLS, developer switches, port/host, and
+CLI settings are documented in [Configuration](docs/configuration.md).
+
+The allowlist is exact and case-insensitive. Listing `example.com` does not
+permit `mail.example.com`. If both an allowlist and
+`HASNA_TENANTS_DISABLE_EMAIL_ALLOWLIST=1` are set, the configured allowlist wins.
+
+## Library and SDK
+
+```ts
+import { TenantsClient } from "@hasna/tenants/sdk";
+
+const client = new TenantsClient({
+  baseUrl: process.env.HASNA_TENANTS_API_URL!,
+});
+
+const jwks = await client.getJwks();
+```
+
+See [Library and SDK](docs/library.md) for package exports, custom fetch/header
+configuration, server embedding, migration helpers, and stateless token
+verification.
 
 ## Develop
 
 ```bash
 bun install
-bun test          # unit tests (no live deps required)
-bun run build     # bundle + type declarations
+bun run typecheck
+bun test
+bun run build
 ```
 
-Applying the schema against a real database:
+Run the complete release gate with:
 
 ```bash
-HASNA_TENANTS_STORAGE_MODE=cloud HASNA_TENANTS_DATABASE_URL=postgres://… \
-  bun run src/server/index.ts migrate --dry-run
+bun run verify:release
 ```
 
-## Releasing
-
-```bash
-bun run verify:release   # typecheck + tests + build + packed-artifact scan
-```
-
-`bun run check:artifact` inspects the **actual packed artifact** — it takes the
-file list from `npm pack --dry-run --json` and scans the content of every file
-npm would publish for owned domain literals, internal hosts and credential
-patterns. Source-level checks are not sufficient: a published bundle can contain
-strings that no reviewer sees in `src/`. The same check runs from the `prepack`
-lifecycle hook, so `npm publish` and `bun publish` both run it.
-
-A packed file the guard cannot read as text is **not** treated as clean — it is
-scanned as raw bytes and as UTF-16 and then fails the check, so a stray NUL byte
-cannot hide a string. A genuine false positive is annotated in place with
-`artifact-check-ignore: <reason>`; every honoured annotation is printed on every
-run, so a suppression is never silent.
-
-One residual gap, stated plainly: `npm publish --ignore-scripts` skips every
-lifecycle hook, this one included, and no package.json setting can prevent that.
-Release through `bun run verify:release`.
+The release gate typechecks, tests, builds, and scans the actual npm packed file
+set for private infrastructure, domain, and credential literals. The same scan
+runs from `prepack`; publishing with `--ignore-scripts` bypasses lifecycle hooks,
+so releases should use `bun run verify:release` first.
 
 ## License
 

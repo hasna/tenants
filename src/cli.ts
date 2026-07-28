@@ -22,6 +22,8 @@ const helpText = `tenants — @hasna/tenants fleet tenant-auth / IdP client
 
 Usage:
   tenants [--json] <command>
+  tenants help | --help
+  tenants version | --version
 
 Commands:
   auth signup --email <e> [--name <n>] [--org <org>] [--password <pw>]
@@ -36,6 +38,11 @@ Commands:
   auth introspect --kid <kid> --key <accessToken|apiKey>
   version
 
+Options:
+  --json     Print help, version, and errors as JSON (API responses are always JSON)
+  --help     Show this help
+  --version  Print the package version
+
 Sign-up and login are limited to the email domains the server allows; signup requires
 email confirmation. Requires HASNA_TENANTS_API_URL (the tenants API base URL). Session
 tokens are returned by verify/login (after confirmation).
@@ -47,6 +54,9 @@ API key. Exchange a session first —
 
 const authHelpText = `tenants auth — fleet tenant-auth / IdP client
 
+Usage:
+  tenants auth <command>
+
   auth signup --email <e> [--name <n>] [--org <org>] [--password <pw>]
   auth login  --email <e> [--password <pw>]        (no password -> OTP challenge)
   auth verify --email <e> --code <code>            (confirm signup / complete an OTP challenge)
@@ -57,6 +67,8 @@ const authHelpText = `tenants auth — fleet tenant-auth / IdP client
   auth whoami --session <s>
   auth jwks
   auth introspect --kid <kid> --key <accessToken|apiKey>
+
+Run \`tenants auth help\` to show this page without contacting the API.
 
 Sign-up and login are limited to the email domains the server allows; signup requires
 email confirmation. Requires HASNA_TENANTS_API_URL. Session tokens are returned by
