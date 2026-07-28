@@ -1,11 +1,13 @@
 #!/usr/bin/env bun
 // CLI for @hasna/tenants — a thin client over the tenant-auth / IdP HTTP API.
 //
-// Every command talks directly to the HTTPS API at HASNA_TENANTS_API_URL.
-// signup/login/verify/resend/jwks are unauthenticated; token/whoami/introspect
-// use the returned session (or an api key) as a Bearer credential.
+// Every command talks directly to the HTTP API at HASNA_TENANTS_API_URL.
+// signup/login/verify/resend/jwks are unauthenticated; token/revoke/whoami use
+// the returned session as a Bearer credential. introspect is the exception: the
+// /v1 gate authenticates an access token or an API key, never a session.
 
 import { getPackageVersion } from "./version.js";
+import { ApiError, TenantsClient, type LoginInput, type SignupInput, type TokenInput } from "./sdk/client.js";
 
 interface ParsedArgs {
   positionals: string[];
@@ -25,20 +27,59 @@ Commands:
   auth signup --email <e> [--name <n>] [--org <org>] [--password <pw>]
   auth login  --email <e> [--password <pw>]        (no password -> OTP challenge)
   auth verify --email <e> --code <code>            (confirm signup / complete an OTP challenge)
+  auth confirm --email <e> --code <code>           (confirm signup via the one-click-link API route)
   auth resend --email <e>                          (re-send an email confirmation code)
   auth token  --session <s> --app <app> [--scope a --scope b] [--tenant <id>] [--ttl <seconds>]
   auth revoke --session <s> --jti <jti>            (deny-list an issued token before its expiry)
   auth whoami --session <s>
   auth jwks
-  auth introspect --kid <kid> --session <s>|--key <apiKey>
+  auth introspect --kid <kid> --key <accessToken|apiKey>
   version
 
 Sign-up and login are limited to the email domains the server allows; signup requires
 email confirmation. Requires HASNA_TENANTS_API_URL (the tenants API base URL). Session
 tokens are returned by verify/login (after confirmation).
+
+introspect does NOT take a session: /v1/introspect authenticates an access token or an
+API key. Exchange a session first —
+  tenants auth token --session <s> --app tenants   (then pass access_token as --key)
 `;
 
-export async function runCli(argv = process.argv.slice(2)): Promise<void> {
+const authHelpText = `tenants auth — fleet tenant-auth / IdP client
+
+  auth signup --email <e> [--name <n>] [--org <org>] [--password <pw>]
+  auth login  --email <e> [--password <pw>]        (no password -> OTP challenge)
+  auth verify --email <e> --code <code>            (confirm signup / complete an OTP challenge)
+  auth confirm --email <e> --code <code>           (confirm signup via the one-click-link API route)
+  auth resend --email <e>                          (re-send an email confirmation code)
+  auth token  --session <s> --app <app> [--scope a --scope b] [--tenant <id>] [--ttl <seconds>]
+  auth revoke --session <s> --jti <jti>            (deny-list an issued token before its expiry)
+  auth whoami --session <s>
+  auth jwks
+  auth introspect --kid <kid> --key <accessToken|apiKey>
+
+Sign-up and login are limited to the email domains the server allows; signup requires
+email confirmation. Requires HASNA_TENANTS_API_URL. Session tokens are returned by
+verify/login (after confirmation).
+
+introspect does NOT take a session: /v1/introspect authenticates an access token or an
+API key. Exchange a session first —
+  tenants auth token --session <s> --app tenants   (then pass access_token as --key)`;
+
+/** Refusal for `auth introspect --session`: the server can never honour it. */
+const SESSION_NOT_ACCEPTED =
+  "auth introspect does not accept --session: /v1/introspect authenticates an access token or an API key. " +
+  "Mint one with `tenants auth token --session <s> --app tenants`, then pass its access_token as --key.";
+
+/**
+ * Run one CLI invocation and RETURN its exit code (0 ok, 1 failed).
+ *
+ * The status is returned rather than written to `process.exitCode` so a caller —
+ * notably the test suite — never has to mutate global process state. Bun ignores
+ * `process.exitCode = undefined`, so a single leaked 1 would otherwise persist
+ * for the whole run and fail `bun test` with no reported failure.
+ */
+export async function runCli(argv = process.argv.slice(2)): Promise<number> {
   const parsed = parseArgs(argv);
   const json = hasFlag(parsed, "json");
   try {
@@ -49,8 +90,9 @@ export async function runCli(argv = process.argv.slice(2)): Promise<void> {
     } else {
       console.error(errorMessage(error));
     }
-    process.exitCode = 1;
+    return 1;
   }
+  return 0;
 }
 
 async function dispatch(parsed: ParsedArgs, json: boolean): Promise<void> {
@@ -77,57 +119,34 @@ async function dispatch(parsed: ParsedArgs, json: boolean): Promise<void> {
 
 async function dispatchAuth(rest: string[], parsed: ParsedArgs, json: boolean): Promise<void> {
   const [subcommand] = rest;
-  const apiUrl = (process.env["HASNA_TENANTS_API_URL"] ?? "").replace(/\/+$/, "");
-  if (!apiUrl && subcommand !== "help") {
-    throw new Error("Set HASNA_TENANTS_API_URL to the tenants API base URL (e.g. https://auth.example.com).");
-  }
-
-  const call = async (method: string, path: string, body?: unknown, session?: string): Promise<unknown> => {
-    const headers: Record<string, string> = { Accept: "application/json" };
-    if (body !== undefined) headers["Content-Type"] = "application/json";
-    if (session) headers["Authorization"] = `Bearer ${session}`;
-    const res = await fetch(`${apiUrl}${path}`, { method, headers, body: body === undefined ? undefined : JSON.stringify(body) });
-    const text = await res.text();
-    const data = text ? (() => { try { return JSON.parse(text); } catch { return text; } })() : null;
-    if (!res.ok) throw new Error(`${method} ${path} -> ${res.status}: ${typeof data === "object" && data && "error" in data ? (data as any).error : text}`);
-    return data;
-  };
-
   if (!subcommand || subcommand === "help") {
-    output(`tenants auth — fleet tenant-auth / IdP client
-
-  auth signup --email <e> [--name <n>] [--org <org>] [--password <pw>]
-  auth login  --email <e> [--password <pw>]        (no password -> OTP challenge)
-  auth verify --email <e> --code <code>            (confirm signup / complete an OTP challenge)
-  auth resend --email <e>                          (re-send an email confirmation code)
-  auth token  --session <s> --app <app> [--scope a --scope b] [--tenant <id>] [--ttl <seconds>]
-  auth revoke --session <s> --jti <jti>            (deny-list an issued token before its expiry)
-  auth whoami --session <s>
-  auth jwks
-  auth introspect --kid <kid> --session <s>|--key <apiKey>
-
-Sign-up and login are limited to the email domains the server allows; signup requires
-email confirmation. Requires HASNA_TENANTS_API_URL. Session tokens are returned by
-verify/login (after confirmation).`, json);
+    output(authHelpText, json);
     return;
   }
 
+  const apiUrl = (process.env["HASNA_TENANTS_API_URL"] ?? "").replace(/\/+$/, "");
+  if (!apiUrl) {
+    throw new Error("Set HASNA_TENANTS_API_URL to the tenants API base URL (e.g. https://auth.example.com).");
+  }
+  const client = new TenantsClient({ baseUrl: apiUrl });
+  const bearer = (token: string): RequestInit => ({ headers: { Authorization: `Bearer ${token}` } });
+
   if (subcommand === "jwks") {
-    output(await call("GET", "/v1/.well-known/jwks.json"), true);
+    output(await client.getJwks(), true);
     return;
   }
   if (subcommand === "signup") {
-    const body: Record<string, unknown> = { email: required(flagValue(parsed, "email"), "auth signup requires --email") };
+    const body: SignupInput = { email: required(flagValue(parsed, "email"), "auth signup requires --email") };
     if (flagValue(parsed, "name")) body["name"] = flagValue(parsed, "name");
     if (flagValue(parsed, "org")) body["org_name"] = flagValue(parsed, "org");
     if (flagValue(parsed, "password")) body["password"] = flagValue(parsed, "password");
-    output(await call("POST", "/v1/auth/signup", body), true);
+    output(await client.signup(body), true);
     return;
   }
   if (subcommand === "login") {
-    const body: Record<string, unknown> = { email: required(flagValue(parsed, "email"), "auth login requires --email") };
+    const body: LoginInput = { email: required(flagValue(parsed, "email"), "auth login requires --email") };
     if (flagValue(parsed, "password")) body["password"] = flagValue(parsed, "password");
-    output(await call("POST", "/v1/auth/login", body), true);
+    output(await client.login(body), true);
     return;
   }
   if (subcommand === "verify") {
@@ -135,40 +154,53 @@ verify/login (after confirmation).`, json);
       email: required(flagValue(parsed, "email"), "auth verify requires --email"),
       code: required(flagValue(parsed, "code"), "auth verify requires --code"),
     };
-    output(await call("POST", "/v1/auth/verify", body), true);
+    output(await client.verifyOtp(body), true);
+    return;
+  }
+  if (subcommand === "confirm") {
+    const query = {
+      email: required(flagValue(parsed, "email"), "auth confirm requires --email"),
+      code: required(flagValue(parsed, "code"), "auth confirm requires --code"),
+    };
+    output(await client.confirm(query), true);
     return;
   }
   if (subcommand === "resend") {
     const body = { email: required(flagValue(parsed, "email"), "auth resend requires --email") };
-    output(await call("POST", "/v1/auth/resend", body), true);
+    output(await client.resendConfirmation(body), true);
     return;
   }
   if (subcommand === "token") {
     const session = required(flagValue(parsed, "session"), "auth token requires --session");
-    const body: Record<string, unknown> = { app: required(flagValue(parsed, "app"), "auth token requires --app") };
+    const body: TokenInput = { app: required(flagValue(parsed, "app"), "auth token requires --app") };
     const scopes = flagValues(parsed, "scope");
     if (scopes.length > 0) body["scopes"] = scopes;
     if (flagValue(parsed, "tenant")) body["tenant_id"] = flagValue(parsed, "tenant");
     // Server-bounded: values above the 24h ceiling are clamped by the API.
     if (flagValue(parsed, "ttl")) body["ttlSeconds"] = Number(flagValue(parsed, "ttl"));
-    output(await call("POST", "/v1/auth/token", body, session), true);
+    output(await client.issueToken(body, bearer(session)), true);
     return;
   }
   if (subcommand === "revoke") {
     const session = required(flagValue(parsed, "session"), "auth revoke requires --session");
     const body = { jti: required(flagValue(parsed, "jti"), "auth revoke requires --jti") };
-    output(await call("POST", "/v1/auth/revoke", body, session), true);
+    output(await client.revokeToken(body, bearer(session)), true);
     return;
   }
   if (subcommand === "whoami") {
     const session = required(flagValue(parsed, "session"), "auth whoami requires --session");
-    output(await call("GET", "/v1/auth/whoami", undefined, session), true);
+    output(await client.whoami(bearer(session)), true);
     return;
   }
   if (subcommand === "introspect") {
     const kid = required(flagValue(parsed, "kid"), "auth introspect requires --kid");
-    const bearer = flagValue(parsed, "session") ?? flagValue(parsed, "key");
-    output(await call("GET", `/v1/introspect?kid=${encodeURIComponent(kid)}`, undefined, bearer), true);
+    // The /v1 gate authenticates an EdDSA access token or an HMAC API key only.
+    // A session token (hst_…) is neither, so the server refuses it outright —
+    // offering --session here would advertise a request that can only ever 401.
+    if (flagValue(parsed, "session")) throw new Error(SESSION_NOT_ACCEPTED);
+    const key = required(flagValue(parsed, "key"), "auth introspect requires --key <accessToken|apiKey>");
+    const introspectClient = new TenantsClient({ baseUrl: apiUrl, apiKey: key });
+    output(await introspectClient.introspect({ kid }), true);
     return;
   }
   throw new Error(`Unknown auth command: ${subcommand}`);
@@ -221,10 +253,43 @@ function output(data: unknown, json: boolean): void {
   else console.log(data);
 }
 
+/** Cap on server-supplied detail: enough to diagnose, not a whole error page. */
+const MAX_ERROR_DETAIL = 500;
+
+function truncate(value: string): string {
+  return value.length > MAX_ERROR_DETAIL ? `${value.slice(0, MAX_ERROR_DETAIL)}… (truncated)` : value;
+}
+
+/**
+ * Render whatever the server sent alongside a non-2xx status.
+ *
+ * The body is NEVER discarded: an ALB, Cloudflare or nginx in front of the API
+ * answers with HTML, and a rate limiter may answer with JSON carrying no `error`
+ * key at all. Dropping those leaves an operator with a bare status code and no
+ * diagnostics, which is the one thing this CLI exists to surface.
+ */
+function errorDetail(body: unknown): string | undefined {
+  if (body === undefined || body === null) return undefined;
+  if (typeof body === "string") return truncate(body.trim()) || undefined;
+  if (typeof body === "object") {
+    const record = body as Record<string, unknown>;
+    if (typeof record["error"] === "string") {
+      const reason = typeof record["reason"] === "string" ? ` (${record["reason"]})` : "";
+      return truncate(`${record["error"]}${reason}`);
+    }
+    return truncate(JSON.stringify(body));
+  }
+  return truncate(String(body));
+}
+
 function errorMessage(error: unknown): string {
+  if (error instanceof ApiError) {
+    const detail = errorDetail(error.body);
+    return detail ? `${error.message}: ${detail}` : error.message;
+  }
   return error instanceof Error ? error.message : String(error);
 }
 
 if (import.meta.main) {
-  await runCli();
+  process.exitCode = await runCli();
 }
