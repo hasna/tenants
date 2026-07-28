@@ -2,8 +2,9 @@
 // CLI for @hasna/tenants — a thin client over the tenant-auth / IdP HTTP API.
 //
 // Every command talks directly to the HTTP API at HASNA_TENANTS_API_URL.
-// signup/login/verify/resend/jwks are unauthenticated; token/whoami/introspect
-// use the returned session as a Bearer credential or an API key as x-api-key.
+// signup/login/verify/resend/jwks are unauthenticated; token/revoke/whoami use
+// the returned session as a Bearer credential. introspect is the exception: the
+// /v1 gate authenticates an access token or an API key, never a session.
 
 import { getPackageVersion } from "./version.js";
 import { ApiError, TenantsClient, type LoginInput, type SignupInput, type TokenInput } from "./sdk/client.js";
@@ -32,12 +33,16 @@ Commands:
   auth revoke --session <s> --jti <jti>            (deny-list an issued token before its expiry)
   auth whoami --session <s>
   auth jwks
-  auth introspect --kid <kid> --session <s>|--key <apiKey>
+  auth introspect --kid <kid> --key <accessToken|apiKey>
   version
 
 Sign-up and login are limited to the email domains the server allows; signup requires
 email confirmation. Requires HASNA_TENANTS_API_URL (the tenants API base URL). Session
 tokens are returned by verify/login (after confirmation).
+
+introspect does NOT take a session: /v1/introspect authenticates an access token or an
+API key. Exchange a session first —
+  tenants auth token --session <s> --app tenants   (then pass access_token as --key)
 `;
 
 const authHelpText = `tenants auth — fleet tenant-auth / IdP client
@@ -51,13 +56,30 @@ const authHelpText = `tenants auth — fleet tenant-auth / IdP client
   auth revoke --session <s> --jti <jti>            (deny-list an issued token before its expiry)
   auth whoami --session <s>
   auth jwks
-  auth introspect --kid <kid> --session <s>|--key <apiKey>
+  auth introspect --kid <kid> --key <accessToken|apiKey>
 
 Sign-up and login are limited to the email domains the server allows; signup requires
 email confirmation. Requires HASNA_TENANTS_API_URL. Session tokens are returned by
-verify/login (after confirmation).`;
+verify/login (after confirmation).
 
-export async function runCli(argv = process.argv.slice(2)): Promise<void> {
+introspect does NOT take a session: /v1/introspect authenticates an access token or an
+API key. Exchange a session first —
+  tenants auth token --session <s> --app tenants   (then pass access_token as --key)`;
+
+/** Refusal for `auth introspect --session`: the server can never honour it. */
+const SESSION_NOT_ACCEPTED =
+  "auth introspect does not accept --session: /v1/introspect authenticates an access token or an API key. " +
+  "Mint one with `tenants auth token --session <s> --app tenants`, then pass its access_token as --key.";
+
+/**
+ * Run one CLI invocation and RETURN its exit code (0 ok, 1 failed).
+ *
+ * The status is returned rather than written to `process.exitCode` so a caller —
+ * notably the test suite — never has to mutate global process state. Bun ignores
+ * `process.exitCode = undefined`, so a single leaked 1 would otherwise persist
+ * for the whole run and fail `bun test` with no reported failure.
+ */
+export async function runCli(argv = process.argv.slice(2)): Promise<number> {
   const parsed = parseArgs(argv);
   const json = hasFlag(parsed, "json");
   try {
@@ -68,8 +90,9 @@ export async function runCli(argv = process.argv.slice(2)): Promise<void> {
     } else {
       console.error(errorMessage(error));
     }
-    process.exitCode = 1;
+    return 1;
   }
+  return 0;
 }
 
 async function dispatch(parsed: ParsedArgs, json: boolean): Promise<void> {
@@ -171,12 +194,13 @@ async function dispatchAuth(rest: string[], parsed: ParsedArgs, json: boolean): 
   }
   if (subcommand === "introspect") {
     const kid = required(flagValue(parsed, "kid"), "auth introspect requires --kid");
-    const session = flagValue(parsed, "session");
-    const key = flagValue(parsed, "key");
-    if (!session && !key) throw new Error("auth introspect requires --session or --key");
-    if (session && key) throw new Error("auth introspect accepts only one of --session or --key");
-    const introspectClient = key ? new TenantsClient({ baseUrl: apiUrl, apiKey: key }) : client;
-    output(await introspectClient.introspect({ kid }, session ? bearer(session) : undefined), true);
+    // The /v1 gate authenticates an EdDSA access token or an HMAC API key only.
+    // A session token (hst_…) is neither, so the server refuses it outright —
+    // offering --session here would advertise a request that can only ever 401.
+    if (flagValue(parsed, "session")) throw new Error(SESSION_NOT_ACCEPTED);
+    const key = required(flagValue(parsed, "key"), "auth introspect requires --key <accessToken|apiKey>");
+    const introspectClient = new TenantsClient({ baseUrl: apiUrl, apiKey: key });
+    output(await introspectClient.introspect({ kid }), true);
     return;
   }
   throw new Error(`Unknown auth command: ${subcommand}`);
@@ -229,16 +253,43 @@ function output(data: unknown, json: boolean): void {
   else console.log(data);
 }
 
+/** Cap on server-supplied detail: enough to diagnose, not a whole error page. */
+const MAX_ERROR_DETAIL = 500;
+
+function truncate(value: string): string {
+  return value.length > MAX_ERROR_DETAIL ? `${value.slice(0, MAX_ERROR_DETAIL)}… (truncated)` : value;
+}
+
+/**
+ * Render whatever the server sent alongside a non-2xx status.
+ *
+ * The body is NEVER discarded: an ALB, Cloudflare or nginx in front of the API
+ * answers with HTML, and a rate limiter may answer with JSON carrying no `error`
+ * key at all. Dropping those leaves an operator with a bare status code and no
+ * diagnostics, which is the one thing this CLI exists to surface.
+ */
+function errorDetail(body: unknown): string | undefined {
+  if (body === undefined || body === null) return undefined;
+  if (typeof body === "string") return truncate(body.trim()) || undefined;
+  if (typeof body === "object") {
+    const record = body as Record<string, unknown>;
+    if (typeof record["error"] === "string") {
+      const reason = typeof record["reason"] === "string" ? ` (${record["reason"]})` : "";
+      return truncate(`${record["error"]}${reason}`);
+    }
+    return truncate(JSON.stringify(body));
+  }
+  return truncate(String(body));
+}
+
 function errorMessage(error: unknown): string {
   if (error instanceof ApiError) {
-    const body = error.body;
-    if (body && typeof body === "object" && "error" in body) {
-      return `${error.message}: ${String((body as any).error)}`;
-    }
+    const detail = errorDetail(error.body);
+    return detail ? `${error.message}: ${detail}` : error.message;
   }
   return error instanceof Error ? error.message : String(error);
 }
 
 if (import.meta.main) {
-  await runCli();
+  process.exitCode = await runCli();
 }
