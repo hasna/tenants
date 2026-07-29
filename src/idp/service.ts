@@ -249,12 +249,16 @@ export class AuthService {
     const email = (input.email ?? "").trim().toLowerCase();
     this.assertEmailAllowed(email);
     if (!email || !email.includes("@")) throw new AuthError(400, "A valid email is required.", "invalid_email");
-    // Same shape whether or not the account exists / is already confirmed
-    // (no enumeration). Only send a fresh code when there is an unconfirmed user.
+    // Only an unconfirmed user actually gets a fresh code, but that is a side
+    // effect: the body below is a fixed constant, byte-identical for unknown,
+    // already-confirmed, and unconfirmed addresses, so an unauthenticated
+    // caller learns nothing about account state. The per-delivery detail
+    // startChallenge() reports (email_sent, email_skipped_reason, email_error,
+    // email_message_id, dev_code) is deliberately DISCARDED here — echoing any
+    // of it, or a `confirmation_required` flag, would re-open the enumeration
+    // oracle this route exists to avoid.
     const user = await this.store.getUserByEmail(email);
-    if (user && !user.email_verified_at) {
-      return { ...(await this.startChallenge(email, "signup")), confirmation_required: true };
-    }
+    if (user && !user.email_verified_at) await this.startChallenge(email, "signup");
     return { challenge: true, purpose: "signup", expires_in: OTP_TTL_SECONDS };
   }
 

@@ -89,9 +89,16 @@ of verify and returns the same session response.
 { "email": "user@example.com" }
 ```
 
-Creates a new signup challenge only for an existing unconfirmed account. Other
-addresses receive the same generic challenge shape without an email, preventing
-account-state enumeration.
+Creates a new signup challenge — and sends the email — only for an existing
+unconfirmed account. That is a side effect: the response body is the fixed
+constant below, byte-identical for unknown, already-confirmed, and unconfirmed
+addresses, so this unauthenticated route reveals no account state. Unlike
+`signup`, it never returns `confirmation_required`, `email_sent`,
+`email_skipped_reason`, or `dev_code`.
+
+```json
+{ "challenge": true, "purpose": "signup", "expires_in": 600 }
+```
 
 ## Session Routes
 

@@ -313,6 +313,35 @@ describe("AuthService login front door (allowlist + confirmation)", () => {
       .rejects.toThrow("Confirm your email");
   });
 
+  // The public shape of resend is the whole security property: if it varies
+  // with account state, the route is an unauthenticated enumeration oracle.
+  test("resend answers with an identical body for unknown, unconfirmed, and confirmed addresses", async () => {
+    const store = new FakeIdpStore();
+    const mailer = new CaptureMailer();
+    const svc = gatedService(store, mailer);
+
+    // pending@ stays unconfirmed; done@ signs up and then confirms.
+    await svc.signup({ email: "pending@example.com", name: "P", password: "pw-pw-pw-pw" });
+    const done = await svc.signup({ email: "done@example.com", name: "D", password: "pw-pw-pw-pw" });
+    await svc.verify({ email: "done@example.com", code: String(done.dev_code) });
+
+    const unknown = await svc.resend({ email: "nobody@example.com" });
+    const unconfirmed = await svc.resend({ email: "pending@example.com" });
+    const confirmed = await svc.resend({ email: "done@example.com" });
+
+    // Same keys AND same values — no confirmation_required / email_sent /
+    // email_skipped_reason / dev_code leaking the account's state.
+    for (const res of [unknown, unconfirmed, confirmed]) {
+      expect(Object.keys(res).sort()).toEqual(["challenge", "expires_in", "purpose"]);
+    }
+    expect(unconfirmed).toEqual(unknown);
+    expect(confirmed).toEqual(unknown);
+
+    // …while the side effect still happens for exactly the unconfirmed account.
+    expect(mailer.sent.map((m) => m.to)).toEqual(["pending@example.com", "done@example.com", "pending@example.com"]);
+    expect(store.challenges.filter((c) => c.email === "nobody@example.com")).toHaveLength(0);
+  });
+
   test("signup → confirm → password login succeeds", async () => {
     const store = new FakeIdpStore();
     const svc = gatedService(store, new CaptureMailer());

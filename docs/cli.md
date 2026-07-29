@@ -47,8 +47,10 @@ tenants auth resend --email <e>
 `verify` posts the OTP. `confirm` sends the same email/code pair to the GET route
 used by one-click email links. A successful verification confirms the address
 and returns a 24-hour `hst_…` session. Codes expire after 10 minutes and allow at
-most five failed attempts. `resend` deliberately returns the same public shape
-for unknown, already-confirmed, and unconfirmed addresses to avoid enumeration.
+most five failed attempts. `resend` deliberately prints the same fixed body —
+`{"challenge":true,"purpose":"signup","expires_in":600}` — for unknown,
+already-confirmed, and unconfirmed addresses to avoid enumeration, so it never
+echoes a `dev_code` even when OTP echo is on.
 
 ### Log In
 
