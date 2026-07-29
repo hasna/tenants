@@ -136,6 +136,22 @@ introspection and does not query a token `jti`. A binding is returned only when
 its tenant matches the authenticated caller; foreign, unknown, or unbound keys
 return `{ "active": false, "kid": "…" }`.
 
+## Service Principals
+
+```text
+tenants principals create --key <access-token-or-api-key> \
+  [--tenant <id>] [--name <name>] [--kind <kind>] [--identity <id>]
+tenants principals token --enrollment-secret <secret> --app <app> \
+  [--scope <scope>]... [--ttl <seconds>]
+tenants principals disable --id <principal-id> --key <access-token-or-api-key>
+```
+
+`create` and `disable` require a `tenants:write` credential. `create` scopes the
+principal to the credential's tenant and prints its enrollment secret once;
+store that value securely. `token` exchanges the secret for a bounded EdDSA
+access token carrying `pt: "service"`. `disable` destroys the enrollment
+credential so it cannot mint another token.
+
 ## Error Output
 
 The CLI includes the server's JSON error/reason or non-JSON proxy body after the

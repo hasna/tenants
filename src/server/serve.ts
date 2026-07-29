@@ -7,6 +7,8 @@
 //   GET  /openapi.json              the OpenAPI document backing the generated SDK
 //   POST /signup|/login             public login front door (aliases of /v1/auth/*)
 //   /v1/auth/*                      public IdP: signup/login/verify/confirm/resend/token/revoke/whoami
+//   POST /v1/principals[/token]     service-principal enrollment and token exchange
+//   POST /v1/principals/:id/disable tenant-scoped service-principal disable
 //   GET  /jwks, /v1/.well-known/... public JWKS (EdDSA) for offline token verification
 //   GET  /v1/introspect            authenticated, TENANT-SCOPED tenant/user binding lookup
 //
@@ -127,6 +129,9 @@ async function authenticate(h: Handler, req: Request, requiredScopes: string[]):
     if (await h.auth.isTokenRevoked(jti)) {
       return { failure: json({ error: "access token revoked", reason: "revoked" }, 401) };
     }
+    if (result.claims.pt === "service" && !(await h.auth.isServicePrincipalActive(result.claims.sub, result.claims.tid))) {
+      return { failure: json({ error: "service principal disabled or not found", reason: "disabled_principal" }, 401) };
+    }
     if (requiredScopes.length > 0 && !hasAllScopes(result.claims.scope ?? [], requiredScopes)) {
       return { failure: json({ error: "insufficient_scope", reason: "insufficient_scope" }, 403) };
     }
@@ -163,8 +168,21 @@ async function handleV1(h: Handler, req: Request, url: URL): Promise<Response> {
       // Tenant-scoped: the binding is only revealed inside the caller's tenant.
       return json(await h.auth.introspect(kid, outcome.caller.tenantId));
     }
+    if (resource === "principals" && segments.length === 2 && method === "POST") {
+      const body = await readJsonBody(req);
+      return json(await h.auth.createServicePrincipal({ ...body, callerTenantId: outcome.caller.tenantId }), 201);
+    }
+    if (resource === "principals" && segments.length === 4 && segments[3] === "disable" && method === "POST") {
+      return json(await h.auth.disableServicePrincipal({
+        principalId: segments[2]!,
+        callerTenantId: outcome.caller.tenantId,
+      }));
+    }
     throw new HttpError(404, `No route for ${method} ${url.pathname}`, "not_found");
   } catch (error) {
+    if (error instanceof AuthError) {
+      return json({ error: error.message, reason: error.code, ...(error.details ?? {}) }, error.status);
+    }
     if (error instanceof HttpError) {
       return json({ error: error.message, reason: error.reason }, error.status);
     }
@@ -200,7 +218,7 @@ async function handleAuth(h: Handler, req: Request, url: URL): Promise<Response 
 
   const isAuthRoute =
     path === "/signup" || path === "/login" ||
-    path.startsWith("/v1/auth/");
+    path.startsWith("/v1/auth/") || path === "/v1/principals/token";
   if (!isAuthRoute) return null;
 
   try {
@@ -230,6 +248,10 @@ async function handleAuth(h: Handler, req: Request, url: URL): Promise<Response 
     if (method === "POST" && path === "/v1/auth/token") {
       const body = await readJsonBody(req);
       return json(await h.auth.token({ ...body, sessionToken: sessionTokenFrom(req, body) }));
+    }
+    if (method === "POST" && path === "/v1/principals/token") {
+      const body = await readJsonBody(req);
+      return json(await h.auth.servicePrincipalToken(body));
     }
     // Revoke an issued access token by jti (owner-scoped, session-authenticated).
     if (method === "POST" && path === "/v1/auth/revoke") {

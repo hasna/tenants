@@ -85,6 +85,75 @@ describe("Tenants IdP HTTP routes", () => {
     expect((await who.json()).principal.email).toBe("route@example.com");
   });
 
+  test("service-principal create → enrollment token (pt=service) → disable works end to end", async () => {
+    const signup = await fetchHandler(new Request("http://x/signup", {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ email: "principal-admin@example.com", password: "pw-pw-pw-pw" }),
+    }));
+    const session = (await signup.json()).session as string;
+    const adminTokenResponse = await fetchHandler(new Request("http://x/v1/auth/token", {
+      method: "POST", headers: { "content-type": "application/json", authorization: `Bearer ${session}` },
+      body: JSON.stringify({ app: "tenants", scopes: ["tenants:write"] }),
+    }));
+    const adminToken = (await adminTokenResponse.json()).access_token as string;
+
+    const create = await fetchHandler(new Request("http://x/v1/principals", {
+      method: "POST", headers: { "content-type": "application/json", authorization: `Bearer ${adminToken}` },
+      body: JSON.stringify({ display_name: "Route agent", identity_id: "identity-route" }),
+    }));
+    expect(create.status).toBe(201);
+    const created = await create.json();
+    const principalId = created.principal.service_principal_id as string;
+    const enrollmentSecret = created.enrollment_secret as string;
+    expect(enrollmentSecret).toStartWith("hse_");
+    expect(fakeStore.servicePrincipals.get(principalId)?.enrollment_secret_ref).not.toBe(enrollmentSecret);
+
+    const exchange = await fetchHandler(new Request("http://x/v1/principals/token", {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ enrollment_secret: enrollmentSecret, app: "tenants", scopes: ["tenants:read"] }),
+    }));
+    expect(exchange.status).toBe(200);
+    const serviceTokenBody = await exchange.json();
+    expect(serviceTokenBody).toMatchObject({
+      pt: "service",
+      service_principal_id: principalId,
+      tid: ROOT_TENANT_ID,
+      scope: ["tenants:read"],
+    });
+    const serviceToken = serviceTokenBody.access_token as string;
+    const beforeDisable = await fetchHandler(new Request("http://x/v1/introspect?kid=none", {
+      headers: { authorization: `Bearer ${serviceToken}` },
+    }));
+    expect(beforeDisable.status).toBe(200);
+
+    const disable = await fetchHandler(new Request(`http://x/v1/principals/${principalId}/disable`, {
+      method: "POST", headers: { "content-type": "application/json", authorization: `Bearer ${adminToken}` },
+      body: "{}",
+    }));
+    expect(disable.status).toBe(200);
+    expect(await disable.json()).toEqual({ disabled: true, service_principal_id: principalId });
+
+    const exchangeAfterDisable = await fetchHandler(new Request("http://x/v1/principals/token", {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ enrollment_secret: enrollmentSecret, app: "todos" }),
+    }));
+    expect(exchangeAfterDisable.status).toBe(401);
+    expect((await exchangeAfterDisable.json()).reason).toBe("invalid_enrollment_secret");
+
+    const tokenAfterDisable = await fetchHandler(new Request("http://x/v1/introspect?kid=none", {
+      headers: { authorization: `Bearer ${serviceToken}` },
+    }));
+    expect(tokenAfterDisable.status).toBe(401);
+    expect((await tokenAfterDisable.json()).reason).toBe("disabled_principal");
+  });
+
+  test("service-principal creation requires tenants:write", async () => {
+    const anonymous = await fetchHandler(new Request("http://x/v1/principals", {
+      method: "POST", headers: { "content-type": "application/json" }, body: "{}",
+    }));
+    expect(anonymous.status).toBe(401);
+  });
+
   test("/v1 still rejects an anonymous request (401)", async () => {
     const res = await fetchHandler(new Request("http://x/v1/introspect?kid=x"));
     expect(res.status).toBe(401);

@@ -60,6 +60,17 @@ export interface MembershipRow {
   status: string;
 }
 
+export interface ServicePrincipalRow {
+  id: string;
+  tenant_id: string;
+  kind: string;
+  display_name: string | null;
+  identity_id: string | null;
+  enrollment_secret_ref: string | null;
+  status: string;
+  last_seen_at: string | null;
+}
+
 export interface SessionRow {
   id: string;
   user_id: string | null;
@@ -98,6 +109,14 @@ export interface IdpStoreApi {
   }): Promise<UserRow>;
   createMembership(input: { tenantId: string; principalId: string; principalType: "user" | "service"; role: string; scopes?: string[] }): Promise<void>;
   listMembershipsForPrincipal(principalId: string, principalType: "user" | "service"): Promise<MembershipRow[]>;
+  createServicePrincipal(input: {
+    id?: string; tenantId: string; kind?: string; displayName?: string | null;
+    identityId?: string | null; enrollmentSecretRef: string;
+  }): Promise<ServicePrincipalRow>;
+  getServicePrincipalById(id: string): Promise<ServicePrincipalRow | null>;
+  getServicePrincipalByEnrollmentSecretRef(enrollmentSecretRef: string): Promise<ServicePrincipalRow | null>;
+  markServicePrincipalSeen(id: string): Promise<void>;
+  disableServicePrincipal(id: string, tenantId: string): Promise<boolean>;
   createSession(input: { userId: string; tenantId: string; tokenHash: string; method?: string; expiresAt: Date; ip?: string | null; userAgent?: string | null }): Promise<string>;
   getSessionByTokenHash(tokenHash: string): Promise<SessionRow | null>;
   createChallenge(input: { email: string; codeHash: string; purpose: string; expiresAt: Date }): Promise<string>;
@@ -312,15 +331,60 @@ export class IdpStore implements IdpStoreApi {
     kind?: string;
     displayName?: string | null;
     identityId?: string | null;
-  }): Promise<string> {
+    enrollmentSecretRef: string;
+  }): Promise<ServicePrincipalRow> {
     const id = input.id ?? newId();
     await this.client.execute(
-      `INSERT INTO ${SERVICE_PRINCIPALS_TABLE} (id, tenant_id, kind, display_name, identity_id)
-         VALUES ($1, $2, $3, $4, $5)
+      `INSERT INTO ${SERVICE_PRINCIPALS_TABLE} (id, tenant_id, kind, display_name, identity_id, enrollment_secret_ref)
+         VALUES ($1, $2, $3, $4, $5, $6)
        ON CONFLICT (id) DO NOTHING`,
-      [id, input.tenantId, input.kind ?? "machine", input.displayName ?? null, input.identityId ?? null],
+      [id, input.tenantId, input.kind ?? "machine", input.displayName ?? null, input.identityId ?? null,
+        input.enrollmentSecretRef],
     );
-    return id;
+    const row = await this.getServicePrincipalById(id);
+    if (!row) throw new Error("Failed to create service principal.");
+    return row;
+  }
+
+  async getServicePrincipalById(id: string): Promise<ServicePrincipalRow | null> {
+    return this.client.get<ServicePrincipalRow>(
+      `SELECT id, tenant_id, kind, display_name, identity_id, enrollment_secret_ref, status, last_seen_at
+         FROM ${SERVICE_PRINCIPALS_TABLE} WHERE id = $1`,
+      [id],
+    );
+  }
+
+  async getServicePrincipalByEnrollmentSecretRef(enrollmentSecretRef: string): Promise<ServicePrincipalRow | null> {
+    return this.client.get<ServicePrincipalRow>(
+      `SELECT id, tenant_id, kind, display_name, identity_id, enrollment_secret_ref, status, last_seen_at
+         FROM ${SERVICE_PRINCIPALS_TABLE}
+        WHERE enrollment_secret_ref = $1 AND status = 'active'`,
+      [enrollmentSecretRef],
+    );
+  }
+
+  async markServicePrincipalSeen(id: string): Promise<void> {
+    await this.client.execute(
+      `UPDATE ${SERVICE_PRINCIPALS_TABLE} SET last_seen_at = now() WHERE id = $1 AND status = 'active'`,
+      [id],
+    );
+  }
+
+  async disableServicePrincipal(id: string, tenantId: string): Promise<boolean> {
+    const row = await this.client.get<{ id: string }>(
+      `UPDATE ${SERVICE_PRINCIPALS_TABLE}
+          SET status = 'disabled', enrollment_secret_ref = NULL
+        WHERE id = $1 AND tenant_id = $2 AND status = 'active'
+      RETURNING id`,
+      [id, tenantId],
+    );
+    if (!row) return false;
+    await this.client.execute(
+      `UPDATE ${MEMBERSHIPS_TABLE} SET status = 'disabled'
+        WHERE principal_id = $1 AND principal_type = 'service' AND tenant_id = $2 AND status = 'active'`,
+      [id, tenantId],
+    );
+    return true;
   }
 
   // ── Sessions ─────────────────────────────────────────────────────────────

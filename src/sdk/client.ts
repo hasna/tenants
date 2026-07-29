@@ -14,13 +14,21 @@ export interface ResendInput { "email": string }
 /** ttlSeconds is server-bounded: values above the 24h ceiling are clamped; non-positive/non-integer values are rejected. */
 export interface TokenInput { "app": string; "scopes"?: Array<string>; "tenant_id"?: string; "ttlSeconds"?: number }
 
+export interface ServicePrincipalCreateInput { "tenant_id"?: string; "kind"?: string; "display_name"?: string; "identity_id"?: string }
+
+export interface ServicePrincipalTokenInput { "enrollment_secret": string; "app": string; "scopes"?: Array<string>; "ttlSeconds"?: number }
+
+export interface ServicePrincipalCreateResponse { "principal"?: Record<string, unknown>; "tenant"?: Record<string, unknown>; "memberships"?: Array<Record<string, unknown>>; "enrollment_secret": string }
+
+export interface ServicePrincipalDisableResponse { "disabled": boolean; "service_principal_id": string }
+
 export interface RevokeInput { "jti": string; "session"?: string }
 
 export interface RevokeResponse { "revoked": boolean; "jti": string }
 
 export interface AuthResponse { "session"?: string; "session_expires_in"?: number; "challenge"?: boolean; "purpose"?: string; "expires_in"?: number; "confirmation_required"?: boolean; "email_sent"?: boolean; "email_message_id"?: string; "email_skipped_reason"?: string; "email_error"?: string; "dev_code"?: string; "user"?: Record<string, unknown>; "tenant"?: Record<string, unknown>; "memberships"?: Array<Record<string, unknown>>; "principal"?: Record<string, unknown>; "tenants"?: Array<Record<string, unknown>>; "apps"?: Array<string> }
 
-export interface TokenResponse { "access_token"?: string; "token_type"?: string; "alg"?: string; "kid"?: string; "aud"?: string; "tid"?: string; "uid"?: string; "pt"?: string; "scope"?: Array<string>; "expires_in"?: number; "jti"?: string; "api_key"?: string; "api_key_kid"?: string; "api_key_expires_at"?: string | null }
+export interface TokenResponse { "access_token"?: string; "token_type"?: string; "alg"?: string; "kid"?: string; "aud"?: string; "tid"?: string; "uid"?: string; "service_principal_id"?: string; "pt"?: string; "scope"?: Array<string>; "expires_in"?: number; "jti"?: string; "api_key"?: string; "api_key_kid"?: string; "api_key_expires_at"?: string | null }
 
 export interface WhoamiResponse { "principal"?: Record<string, unknown>; "tenants"?: Array<Record<string, unknown>>; "apps"?: Array<string> }
 
@@ -116,6 +124,21 @@ export class TenantsClient {
   /** Mint a per-app fleet access token from a session (Bearer session). */
   async issueToken(body: TokenInput, init?: RequestInit): Promise<TokenResponse> {
     return this.request("POST", `/v1/auth/token`, { body, query: undefined, init });
+  }
+
+  /** Create a service principal in the authenticated credential's tenant. */
+  async createServicePrincipal(body: ServicePrincipalCreateInput, init?: RequestInit): Promise<ServicePrincipalCreateResponse> {
+    return this.request("POST", `/v1/principals`, { body, query: undefined, init });
+  }
+
+  /** Exchange a service principal enrollment secret for a pt=service fleet token. */
+  async issueServicePrincipalToken(body: ServicePrincipalTokenInput, init?: RequestInit): Promise<TokenResponse> {
+    return this.request("POST", `/v1/principals/token`, { body, query: undefined, init });
+  }
+
+  /** Disable a tenant-owned service principal and destroy its enrollment credential. */
+  async disableServicePrincipal(principalId: string, init?: RequestInit): Promise<ServicePrincipalDisableResponse> {
+    return this.request("POST", `/v1/principals/${encodeURIComponent(principalId)}/disable`, { body: {}, query: undefined, init });
   }
 
   /** Revoke an issued access token by jti before its expiry (Bearer session; owner-scoped). */

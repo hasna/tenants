@@ -92,6 +92,9 @@ tenants auth revoke --session <s> --jti <jti>
 tenants auth whoami --session <s>
 tenants auth jwks
 tenants auth introspect --kid <kid> --key <access-token-or-api-key>
+tenants principals create --key <access-token-or-api-key> [--name <n>] [--kind <kind>] [--identity <id>]
+tenants principals token --enrollment-secret <secret> --app <app> [--scope <scope>]... [--ttl <seconds>]
+tenants principals disable --id <principal-id> --key <access-token-or-api-key>
 tenants version
 ```
 
@@ -113,6 +116,9 @@ POST /v1/auth/resend                             public
 POST /v1/auth/token                              Bearer session
 POST /v1/auth/revoke                             Bearer session
 GET  /v1/auth/whoami                             Bearer session
+POST /v1/principals                              access token or API key (tenants:write)
+POST /v1/principals/token                        enrollment secret
+POST /v1/principals/{id}/disable                 access token or API key (tenants:write)
 GET  /v1/introspect?kid=…                        access token or API key
 ```
 

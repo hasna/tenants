@@ -16,7 +16,8 @@ routes and compatibility aliases are documented here.
 
 ## Authentication
 
-- **Public:** JWKS, signup, login, verify, confirm, and resend.
+- **Public:** JWKS, signup, login, verify, confirm, resend, and service-principal
+  enrollment-secret exchange.
 - **Session:** token, revoke, and whoami accept `Authorization: Bearer hst_…`.
   Token and revoke also accept a `session` property in the JSON body, but bearer
   authentication is preferred and is what the CLI sends.
@@ -24,6 +25,9 @@ routes and compatibility aliases are documented here.
   EdDSA access token in `Authorization: Bearer …` or a transitional HMAC API key
   accepted by the contracts auth kit (including `x-api-key`). It requires
   `tenants:read` for GET requests.
+- **Fleet credential:** creating and disabling service principals use the same
+  gate with `tenants:write`; the principal is always scoped to the caller's
+  tenant.
 
 All `/v1` access tokens are verified for EdDSA signature, fixed issuer,
 `aud=tenants`, timestamps, required scopes, non-empty `jti`, and local revocation
@@ -157,6 +161,47 @@ token's bounded expiry.
 
 Returns the session principal, active memberships, and supported fleet app
 slugs.
+
+## Service Principals
+
+### `POST /v1/principals`
+
+Requires a `tenants`-audience access token or API key with `tenants:write`.
+Creates a service principal and `service` membership in the authenticated
+credential's tenant. An optional `tenant_id` is only an assertion and must match
+that tenant.
+
+```json
+{ "display_name": "Build agent", "kind": "machine", "identity_id": "optional external id" }
+```
+
+The response returns an `hse_…` `enrollment_secret` once. The database stores
+only its SHA-256 digest in `enrollment_secret_ref`; callers must put the returned
+secret in their credential store.
+
+### `POST /v1/principals/token`
+
+```json
+{
+  "enrollment_secret": "hse_…",
+  "app": "todos",
+  "scopes": ["todos:read"],
+  "ttlSeconds": 3600
+}
+```
+
+Exchanges an active principal's enrollment secret for an EdDSA token whose
+claims contain the service-principal ID as `sub` and `pt: "service"`. Scope and
+TTL narrowing follows the user token rules. No session or fleet credential is
+required in addition to the enrollment secret.
+
+### `POST /v1/principals/{principalId}/disable`
+
+Requires `tenants:write` and only affects a principal in the caller's tenant.
+It sets the principal and membership to disabled and destroys the stored
+enrollment-secret digest. Existing service tokens are immediately rejected on
+this service's stateful `/v1` gate; offline JWKS consumers may accept them until
+their bounded expiry.
 
 ## JWKS and Introspection
 

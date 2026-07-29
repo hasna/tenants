@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { generateKeyPairSync } from "node:crypto";
 import { AuthService, AuthError } from "./service.js";
 import { UNRESTRICTED_EMAIL_POLICY } from "./policy.js";
-import type { IdpStoreApi, MembershipRow, SessionRow, TenantRow, UserRow } from "./store.js";
+import type { IdpStoreApi, MembershipRow, ServicePrincipalRow, SessionRow, TenantRow, UserRow } from "./store.js";
 import { signingKeyFromPrivateJwk, verifyAccessToken, type JwkPublic, type SigningKey } from "./tokens.js";
 import { ROOT_TENANT_ID } from "./ids.js";
 import { newId } from "./ids.js";
@@ -10,6 +10,7 @@ import { newId } from "./ids.js";
 /** In-memory IdpStore for unit-testing the auth logic without a database. */
 class FakeIdpStore implements IdpStoreApi {
   users = new Map<string, UserRow>();
+  servicePrincipals = new Map<string, ServicePrincipalRow>();
   tenants = new Map<string, TenantRow>();
   memberships: MembershipRow[] = [];
   sessions = new Map<string, SessionRow>();
@@ -52,6 +53,35 @@ class FakeIdpStore implements IdpStoreApi {
   }
   async listMembershipsForPrincipal(principalId: string, principalType: "user" | "service"): Promise<MembershipRow[]> {
     return this.memberships.filter((m) => m.principal_id === principalId && m.principal_type === principalType && m.status === "active");
+  }
+  async createServicePrincipal(input: any): Promise<ServicePrincipalRow> {
+    const row: ServicePrincipalRow = {
+      id: input.id ?? newId(), tenant_id: input.tenantId, kind: input.kind ?? "machine",
+      display_name: input.displayName ?? null, identity_id: input.identityId ?? null,
+      enrollment_secret_ref: input.enrollmentSecretRef, status: "active", last_seen_at: null,
+    };
+    this.servicePrincipals.set(row.id, row);
+    return row;
+  }
+  async getServicePrincipalById(id: string): Promise<ServicePrincipalRow | null> { return this.servicePrincipals.get(id) ?? null; }
+  async getServicePrincipalByEnrollmentSecretRef(ref: string): Promise<ServicePrincipalRow | null> {
+    return [...this.servicePrincipals.values()].find((p) => p.enrollment_secret_ref === ref && p.status === "active") ?? null;
+  }
+  async markServicePrincipalSeen(id: string): Promise<void> {
+    const principal = this.servicePrincipals.get(id);
+    if (principal?.status === "active") principal.last_seen_at = new Date().toISOString();
+  }
+  async disableServicePrincipal(id: string, tenantId: string): Promise<boolean> {
+    const principal = this.servicePrincipals.get(id);
+    if (!principal || principal.tenant_id !== tenantId || principal.status !== "active") return false;
+    principal.status = "disabled";
+    principal.enrollment_secret_ref = null;
+    for (const membership of this.memberships) {
+      if (membership.principal_id === id && membership.principal_type === "service" && membership.tenant_id === tenantId) {
+        membership.status = "disabled";
+      }
+    }
+    return true;
   }
   async createSession(input: any): Promise<string> {
     const id = newId();
@@ -183,6 +213,61 @@ describe("AuthService", () => {
     await expect(svc.token({ sessionToken: "bogus", app: "todos" })).rejects.toThrow("Invalid session");
     const s = await svc.signup({ email: "t@example.com", name: "T", password: "pw-pw-pw-pw" });
     await expect(svc.token({ sessionToken: String(s.session), app: "not-a-real-app" })).rejects.toThrow("Unknown app");
+  });
+
+  test("service-principal enrollment mints pt=service tokens and disable destroys the credential", async () => {
+    const store = new FakeIdpStore();
+    const svc = service(store);
+    const created = await svc.createServicePrincipal({
+      callerTenantId: ROOT_TENANT_ID,
+      display_name: "Build agent",
+      identity_id: "identity-123",
+    });
+    const enrollmentSecret = String(created.enrollment_secret);
+    const principalId = String((created.principal as any).service_principal_id);
+    expect(enrollmentSecret).toStartWith("hse_");
+    expect(store.servicePrincipals.get(principalId)?.enrollment_secret_ref).not.toBe(enrollmentSecret);
+
+    const minted = await svc.servicePrincipalToken({
+      enrollment_secret: enrollmentSecret,
+      app: "todos",
+      scopes: ["todos:read"],
+      ttlSeconds: 60,
+    });
+    expect(minted).toMatchObject({
+      pt: "service",
+      service_principal_id: principalId,
+      tid: ROOT_TENANT_ID,
+      scope: ["todos:read"],
+      expires_in: 60,
+    });
+    const verified = verifyAccessToken(String(minted.access_token), {
+      jwks: await store.listPublicJwks(),
+      expectedAudience: "todos",
+    });
+    expect(verified.ok).toBe(true);
+    if (verified.ok) {
+      expect(verified.claims.sub).toBe(principalId);
+      expect(verified.claims.pt).toBe("service");
+    }
+
+    expect(await svc.disableServicePrincipal({ callerTenantId: ROOT_TENANT_ID, principalId }))
+      .toEqual({ disabled: true, service_principal_id: principalId });
+    expect(await svc.isServicePrincipalActive(principalId, ROOT_TENANT_ID)).toBe(false);
+    await expect(svc.servicePrincipalToken({ enrollment_secret: enrollmentSecret, app: "todos" }))
+      .rejects.toThrow("Invalid enrollment secret");
+  });
+
+  test("service principals cannot be created or disabled across tenant boundaries", async () => {
+    const store = new FakeIdpStore();
+    const svc = service(store);
+    await expect(svc.createServicePrincipal({ callerTenantId: ROOT_TENANT_ID, tenant_id: newId() }))
+      .rejects.toThrow("another tenant");
+    const created = await svc.createServicePrincipal({ callerTenantId: ROOT_TENANT_ID });
+    const principalId = String((created.principal as any).service_principal_id);
+    expect(await svc.disableServicePrincipal({ callerTenantId: newId(), principalId }))
+      .toEqual({ disabled: false, service_principal_id: principalId });
+    expect(await svc.isServicePrincipalActive(principalId, ROOT_TENANT_ID)).toBe(true);
   });
 
   test("whoami reflects the principal + tenants", async () => {

@@ -12,7 +12,7 @@
 import { generateKeyPairSync } from "node:crypto";
 import { AuthService } from "../idp/service.js";
 import { UNRESTRICTED_EMAIL_POLICY } from "../idp/policy.js";
-import type { IdpStoreApi, MembershipRow, SessionRow, TenantRow, UserRow } from "../idp/store.js";
+import type { IdpStoreApi, MembershipRow, ServicePrincipalRow, SessionRow, TenantRow, UserRow } from "../idp/store.js";
 import { signingKeyFromPrivateJwk, type JwkPublic, type SigningKey } from "../idp/tokens.js";
 import { ROOT_TENANT_ID, newId } from "../idp/ids.js";
 import { createFetchHandler } from "../server/serve.js";
@@ -23,6 +23,7 @@ export const TEST_SIGNING_SECRET = "test-signing-secret-for-auth-routes";
 /** In-memory IdpStore so the HTTP surface is exercised without a database. */
 export class FakeIdpStore implements IdpStoreApi {
   users = new Map<string, UserRow>();
+  servicePrincipals = new Map<string, ServicePrincipalRow>();
   memberships: MembershipRow[] = [];
   sessions = new Map<string, SessionRow>();
   challenges: Array<{ id: string; email: string; code_hash: string; purpose: string; consumed: boolean; attempts: number; expiresAt: number }> = [];
@@ -45,6 +46,24 @@ export class FakeIdpStore implements IdpStoreApi {
   async markEmailVerified(userId: string): Promise<void> { const u = this.users.get(userId); if (u && !u.email_verified_at) u.email_verified_at = new Date().toISOString(); }
   async createMembership(input: any): Promise<void> { this.memberships.push({ id: String(this.memberships.length + 1), tenant_id: input.tenantId, principal_id: input.principalId, principal_type: input.principalType, role: input.role, scopes: [], status: "active" }); }
   async listMembershipsForPrincipal(principalId: string, principalType: "user" | "service"): Promise<MembershipRow[]> { return this.memberships.filter((m) => m.principal_id === principalId && m.principal_type === principalType); }
+  async createServicePrincipal(input: any): Promise<ServicePrincipalRow> {
+    const row: ServicePrincipalRow = {
+      id: input.id ?? newId(), tenant_id: input.tenantId, kind: input.kind ?? "machine",
+      display_name: input.displayName ?? null, identity_id: input.identityId ?? null,
+      enrollment_secret_ref: input.enrollmentSecretRef, status: "active", last_seen_at: null,
+    };
+    this.servicePrincipals.set(row.id, row); return row;
+  }
+  async getServicePrincipalById(id: string): Promise<ServicePrincipalRow | null> { return this.servicePrincipals.get(id) ?? null; }
+  async getServicePrincipalByEnrollmentSecretRef(ref: string): Promise<ServicePrincipalRow | null> { return [...this.servicePrincipals.values()].find((p) => p.enrollment_secret_ref === ref && p.status === "active") ?? null; }
+  async markServicePrincipalSeen(id: string): Promise<void> { const p = this.servicePrincipals.get(id); if (p?.status === "active") p.last_seen_at = new Date().toISOString(); }
+  async disableServicePrincipal(id: string, tenantId: string): Promise<boolean> {
+    const p = this.servicePrincipals.get(id);
+    if (!p || p.tenant_id !== tenantId || p.status !== "active") return false;
+    p.status = "disabled"; p.enrollment_secret_ref = null;
+    for (const m of this.memberships) if (m.principal_id === id && m.principal_type === "service" && m.tenant_id === tenantId) m.status = "disabled";
+    return true;
+  }
   async createSession(input: any): Promise<string> { const id = newId(); this.sessions.set(input.tokenHash, { id, user_id: input.userId, tenant_id: input.tenantId, token_hash: input.tokenHash, method: null, issued_at: new Date().toISOString(), expires_at: input.expiresAt.toISOString(), revoked_at: null }); return id; }
   async getSessionByTokenHash(h: string): Promise<SessionRow | null> { return this.sessions.get(h) ?? null; }
   async createChallenge(input: any): Promise<string> { const id = newId(); this.challenges.push({ id, email: input.email, code_hash: input.codeHash, purpose: input.purpose, consumed: false, attempts: 0, expiresAt: input.expiresAt.getTime() }); return id; }

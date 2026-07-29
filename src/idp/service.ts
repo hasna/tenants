@@ -9,7 +9,7 @@
 
 import { mintApiKey, hasScope, type ApiKeyStore } from "@hasna/contracts/auth";
 import { randomBytes } from "node:crypto";
-import type { IdpStoreApi, MembershipRow, UserRow } from "./store.js";
+import type { IdpStoreApi, MembershipRow, ServicePrincipalRow, UserRow } from "./store.js";
 import { hashPassword, sha256, verifyPassword } from "./passwords.js";
 import { isUuid, newId, ROOT_TENANT_ID } from "./ids.js";
 import { buildJwks, signAccessToken, MAX_ACCESS_TOKEN_TTL_SECONDS, type JwksDocument } from "./tokens.js";
@@ -88,6 +88,10 @@ function generateOtp(): string {
 
 function newSessionToken(): string {
   return `hst_${randomBytes(32).toString("base64url")}`;
+}
+
+function newEnrollmentSecret(): string {
+  return `hse_${randomBytes(32).toString("base64url")}`;
 }
 
 export interface PrincipalSummary {
@@ -383,6 +387,131 @@ export class AuthService {
     return response;
   }
 
+  // ── service principals ─────────────────────────────────────────────────────
+
+  /** Create a tenant-bound service principal and return its enrollment secret once. */
+  async createServicePrincipal(input: {
+    callerTenantId: string | null;
+    tenant_id?: string;
+    kind?: string;
+    display_name?: string;
+    identity_id?: string;
+  }): Promise<Record<string, unknown>> {
+    const tenantId = input.callerTenantId;
+    if (!tenantId) throw new AuthError(403, "The caller credential is not bound to a tenant.", "no_tenant");
+    if (input.tenant_id && input.tenant_id !== tenantId) {
+      throw new AuthError(403, "Cannot create a service principal in another tenant.", "tenant_mismatch");
+    }
+    const kind = (input.kind ?? "machine").trim();
+    if (!kind) throw new AuthError(400, "kind must not be empty.", "invalid_request");
+    const enrollmentSecret = newEnrollmentSecret();
+    const principal = await this.store.createServicePrincipal({
+      tenantId,
+      kind,
+      displayName: input.display_name?.trim() || null,
+      identityId: input.identity_id?.trim() || null,
+      // The high-entropy bearer secret is never persisted in plaintext.
+      enrollmentSecretRef: sha256(enrollmentSecret),
+    });
+    await this.store.createMembership({
+      tenantId,
+      principalId: principal.id,
+      principalType: "service",
+      role: "service",
+    });
+    return {
+      principal: this.servicePrincipalSummary(principal),
+      tenant: { tenant_id: tenantId },
+      memberships: [{ tenant_id: tenantId, role: "service" }],
+      enrollment_secret: enrollmentSecret,
+    };
+  }
+
+  /** Exchange a service principal's enrollment secret for a pt=service access token. */
+  async servicePrincipalToken(input: {
+    enrollment_secret?: string;
+    app?: string;
+    scopes?: string[];
+    ttlSeconds?: number;
+  }): Promise<Record<string, unknown>> {
+    const enrollmentSecret = (input.enrollment_secret ?? "").trim();
+    if (!enrollmentSecret) throw new AuthError(401, "Missing enrollment secret.", "missing_enrollment_secret");
+    const principal = await this.store.getServicePrincipalByEnrollmentSecretRef(sha256(enrollmentSecret));
+    if (!principal || principal.status !== "active") {
+      throw new AuthError(401, "Invalid enrollment secret.", "invalid_enrollment_secret");
+    }
+
+    const app = (input.app ?? "").trim();
+    if (!app) throw new AuthError(400, "app is required.", "invalid_request");
+    if (!FLEET_APPS.includes(app)) throw new AuthError(400, `Unknown app: ${app}`, "unknown_app");
+    if (input.ttlSeconds !== undefined && (!Number.isSafeInteger(input.ttlSeconds) || input.ttlSeconds <= 0)) {
+      throw new AuthError(400, "ttlSeconds must be a positive integer.", "invalid_ttl", {
+        max_ttl_seconds: MAX_ACCESS_TOKEN_TTL_SECONDS,
+      });
+    }
+
+    const memberships = await this.store.listMembershipsForPrincipal(principal.id, "service");
+    const membership = memberships.find((candidate) => candidate.tenant_id === principal.tenant_id);
+    if (!membership) throw new AuthError(403, "No tenant membership for this principal.", "no_membership");
+    const scope = this.resolveScopes(app, membership, input.scopes);
+    const jti = newId();
+    const signingKey = await this.store.getSigningKeyForMinting();
+    const { token, claims } = signAccessToken(signingKey, {
+      aud: app,
+      sub: principal.id,
+      tid: principal.tenant_id,
+      pt: "service",
+      scope,
+      ...(input.ttlSeconds !== undefined ? { ttlSeconds: input.ttlSeconds } : {}),
+      jti,
+      nowMs: this.now(),
+    });
+    await this.store.recordIssuedAccessToken({
+      jti,
+      userId: null,
+      tenantId: principal.tenant_id,
+      aud: app,
+      expiresAt: new Date(claims.exp * 1000),
+    });
+    await this.store.markServicePrincipalSeen(principal.id);
+
+    return {
+      access_token: token,
+      token_type: "Bearer",
+      alg: "EdDSA",
+      kid: signingKey.kid,
+      aud: app,
+      tid: principal.tenant_id,
+      service_principal_id: principal.id,
+      pt: "service",
+      scope,
+      expires_in: claims.exp - claims.iat,
+      jti,
+    };
+  }
+
+  /** Disable a service principal in the caller's tenant and destroy its enrollment credential. */
+  async disableServicePrincipal(input: {
+    callerTenantId: string | null;
+    principalId: string;
+  }): Promise<Record<string, unknown>> {
+    if (!input.callerTenantId) {
+      throw new AuthError(403, "The caller credential is not bound to a tenant.", "no_tenant");
+    }
+    if (!isUuid(input.principalId)) {
+      throw new AuthError(400, "principal id must be a UUID.", "invalid_request");
+    }
+    const disabled = await this.store.disableServicePrincipal(input.principalId, input.callerTenantId);
+    return { disabled, service_principal_id: input.principalId };
+  }
+
+  /** Stateful check for service tokens used on this service after disable. */
+  async isServicePrincipalActive(principalId: string, tenantId: string | undefined): Promise<boolean> {
+    if (!tenantId) return false;
+    const principal = await this.store.getServicePrincipalById(principalId);
+    return principal?.tenant_id === tenantId && principal.status === "active";
+  }
+
   // ── revoke (deny-list an issued access token before exp) ────────────────────
 
   /**
@@ -451,6 +580,26 @@ export class AuthService {
 
   private principalSummary(user: UserRow): PrincipalSummary {
     return { user_id: user.id, kind: user.kind, email: user.email, display_name: user.display_name };
+  }
+
+  private servicePrincipalSummary(principal: ServicePrincipalRow): Record<string, unknown> {
+    return {
+      service_principal_id: principal.id,
+      kind: principal.kind,
+      display_name: principal.display_name,
+      identity_id: principal.identity_id,
+      status: principal.status,
+    };
+  }
+
+  private resolveScopes(app: string, membership: MembershipRow, requested: string[] | undefined): string[] {
+    const granted = roleScopes(app, membership.role);
+    if (!requested || requested.length === 0) return granted;
+    const overreach = requested.filter((scope) => !hasScope(granted, scope));
+    if (overreach.length > 0) {
+      throw new AuthError(403, `Requested scopes exceed this membership's grants: ${overreach.join(", ")}`, "insufficient_scope");
+    }
+    return requested;
   }
 
   private async startChallenge(email: string, purpose: "signup" | "login"): Promise<Record<string, unknown>> {

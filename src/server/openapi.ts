@@ -1,8 +1,9 @@
 // OpenAPI 3.1 description of the @hasna/tenants HTTP API. This is the
 // single source of truth for both the running server routes and the generated
 // SDK. It describes ONLY the tenant-auth / IdP surface: signup / login / verify /
-// confirm / resend / token / whoami / JWKS / introspect. (The agent-identity CRUD
-// surface lives in the separate @hasna/identities package and is NOT here.)
+// confirm / resend / token / whoami / service-principal enrollment / JWKS /
+// introspect. (The agent-identity CRUD surface lives in the separate
+// @hasna/identities package and is NOT here.)
 
 import { MAX_ACCESS_TOKEN_TTL_SECONDS } from "../idp/tokens.js";
 
@@ -87,6 +88,48 @@ export function buildOpenApiDocument(version: string) {
           },
           required: ["app"],
         },
+        ServicePrincipalCreateInput: {
+          type: "object",
+          properties: {
+            tenant_id: { type: "string", format: "uuid", description: "Optional assertion; must match the authenticated credential's tenant." },
+            kind: { type: "string", default: "machine" },
+            display_name: { type: "string" },
+            identity_id: { type: "string" },
+          },
+        },
+        ServicePrincipalTokenInput: {
+          type: "object",
+          properties: {
+            enrollment_secret: { type: "string", description: "High-entropy secret returned once when the principal is created." },
+            app: { type: "string" },
+            scopes: { type: "array", items: { type: "string" } },
+            ttlSeconds: {
+              type: "integer",
+              minimum: 1,
+              maximum: MAX_ACCESS_TOKEN_TTL_SECONDS,
+            },
+          },
+          required: ["enrollment_secret", "app"],
+        },
+        ServicePrincipalCreateResponse: {
+          type: "object",
+          additionalProperties: true,
+          properties: {
+            principal: { type: "object", additionalProperties: true },
+            tenant: { type: "object", additionalProperties: true },
+            memberships: { type: "array", items: { type: "object", additionalProperties: true } },
+            enrollment_secret: { type: "string", description: "Returned once; only a SHA-256 digest is persisted." },
+          },
+          required: ["principal", "tenant", "memberships", "enrollment_secret"],
+        },
+        ServicePrincipalDisableResponse: {
+          type: "object",
+          properties: {
+            disabled: { type: "boolean" },
+            service_principal_id: { type: "string", format: "uuid" },
+          },
+          required: ["disabled", "service_principal_id"],
+        },
         RevokeInput: {
           type: "object",
           properties: { jti: { type: "string" }, session: { type: "string" } },
@@ -131,6 +174,7 @@ export function buildOpenApiDocument(version: string) {
             aud: { type: "string" },
             tid: { type: "string" },
             uid: { type: "string" },
+            service_principal_id: { type: "string" },
             pt: { type: "string" },
             scope: { type: "array", items: { type: "string" } },
             expires_in: { type: "integer" },
@@ -233,6 +277,33 @@ export function buildOpenApiDocument(version: string) {
           security: [{ SessionBearer: [] }],
           requestBody: jsonBody("TokenInput"),
           responses: jsonResponse("TokenResponse"),
+        },
+      },
+      "/v1/principals": {
+        post: {
+          operationId: "createServicePrincipal",
+          summary: "Create a service principal in the caller's tenant and return its enrollment secret once",
+          security: [{ FleetAccessToken: [] }, { ApiKeyAuth: [] }],
+          requestBody: jsonBody("ServicePrincipalCreateInput"),
+          responses: jsonResponse("ServicePrincipalCreateResponse", "201"),
+        },
+      },
+      "/v1/principals/token": {
+        post: {
+          operationId: "issueServicePrincipalToken",
+          summary: "Exchange an enrollment secret for a pt=service fleet access token",
+          security: [],
+          requestBody: jsonBody("ServicePrincipalTokenInput"),
+          responses: jsonResponse("TokenResponse"),
+        },
+      },
+      "/v1/principals/{principalId}/disable": {
+        post: {
+          operationId: "disableServicePrincipal",
+          summary: "Disable a service principal in the caller's tenant and destroy its enrollment credential",
+          security: [{ FleetAccessToken: [] }, { ApiKeyAuth: [] }],
+          parameters: [{ name: "principalId", in: "path", required: true, schema: { type: "string", format: "uuid" } }],
+          responses: jsonResponse("ServicePrincipalDisableResponse"),
         },
       },
       "/v1/auth/revoke": {

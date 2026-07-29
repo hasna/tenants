@@ -7,7 +7,15 @@
 // /v1 gate authenticates an access token or an API key, never a session.
 
 import { getPackageVersion } from "./version.js";
-import { ApiError, TenantsClient, type LoginInput, type SignupInput, type TokenInput } from "./sdk/client.js";
+import {
+  ApiError,
+  TenantsClient,
+  type LoginInput,
+  type ServicePrincipalCreateInput,
+  type ServicePrincipalTokenInput,
+  type SignupInput,
+  type TokenInput,
+} from "./sdk/client.js";
 
 interface ParsedArgs {
   positionals: string[];
@@ -36,6 +44,9 @@ Commands:
   auth whoami --session <s>
   auth jwks
   auth introspect --kid <kid> --key <accessToken|apiKey>
+  principals create --key <accessToken|apiKey> [--tenant <id>] [--name <n>] [--kind <kind>] [--identity <id>]
+  principals token --enrollment-secret <secret> --app <app> [--scope a --scope b] [--ttl <seconds>]
+  principals disable --id <principalId> --key <accessToken|apiKey>
   version
 
 Options:
@@ -51,6 +62,19 @@ introspect does NOT take a session: /v1/introspect authenticates an access token
 API key. Exchange a session first —
   tenants auth token --session <s> --app tenants   (then pass access_token as --key)
 `;
+
+const principalsHelpText = `tenants principals — service-principal enrollment and tokens
+
+Usage:
+  tenants principals <command>
+
+  principals create --key <accessToken|apiKey> [--tenant <id>] [--name <n>] [--kind <kind>] [--identity <id>]
+  principals token --enrollment-secret <secret> --app <app> [--scope a --scope b] [--ttl <seconds>]
+  principals disable --id <principalId> --key <accessToken|apiKey>
+
+create and disable require a tenants:write fleet credential. create returns the
+enrollment secret once; store it securely. token exchanges that secret for a
+short-lived fleet access token with pt=service.`;
 
 const authHelpText = `tenants auth — fleet tenant-auth / IdP client
 
@@ -126,7 +150,57 @@ async function dispatch(parsed: ParsedArgs, json: boolean): Promise<void> {
     return;
   }
 
+  if (command === "principals") {
+    await dispatchPrincipals(rest, parsed, json);
+    return;
+  }
+
   throw new Error(`Unknown command: ${command}`);
+}
+
+async function dispatchPrincipals(rest: string[], parsed: ParsedArgs, json: boolean): Promise<void> {
+  const [subcommand] = rest;
+  if (!subcommand || subcommand === "help") {
+    output(principalsHelpText, json);
+    return;
+  }
+
+  const apiUrl = (process.env["HASNA_TENANTS_API_URL"] ?? "").replace(/\/+$/, "");
+  if (!apiUrl) {
+    throw new Error("Set HASNA_TENANTS_API_URL to the tenants API base URL (e.g. https://auth.example.com).");
+  }
+
+  if (subcommand === "create") {
+    const key = required(flagValue(parsed, "key"), "principals create requires --key <accessToken|apiKey>");
+    const body: ServicePrincipalCreateInput = {};
+    if (flagValue(parsed, "tenant")) body["tenant_id"] = flagValue(parsed, "tenant");
+    if (flagValue(parsed, "name")) body["display_name"] = flagValue(parsed, "name");
+    if (flagValue(parsed, "kind")) body["kind"] = flagValue(parsed, "kind");
+    if (flagValue(parsed, "identity")) body["identity_id"] = flagValue(parsed, "identity");
+    output(await new TenantsClient({ baseUrl: apiUrl, apiKey: key }).createServicePrincipal(body), true);
+    return;
+  }
+  if (subcommand === "token") {
+    const body: ServicePrincipalTokenInput = {
+      enrollment_secret: required(
+        flagValue(parsed, "enrollment-secret"),
+        "principals token requires --enrollment-secret",
+      ),
+      app: required(flagValue(parsed, "app"), "principals token requires --app"),
+    };
+    const scopes = flagValues(parsed, "scope");
+    if (scopes.length > 0) body["scopes"] = scopes;
+    if (flagValue(parsed, "ttl")) body["ttlSeconds"] = Number(flagValue(parsed, "ttl"));
+    output(await new TenantsClient({ baseUrl: apiUrl }).issueServicePrincipalToken(body), true);
+    return;
+  }
+  if (subcommand === "disable") {
+    const principalId = required(flagValue(parsed, "id"), "principals disable requires --id");
+    const key = required(flagValue(parsed, "key"), "principals disable requires --key <accessToken|apiKey>");
+    output(await new TenantsClient({ baseUrl: apiUrl, apiKey: key }).disableServicePrincipal(principalId), true);
+    return;
+  }
+  throw new Error(`Unknown principals command: ${subcommand}`);
 }
 
 async function dispatchAuth(rest: string[], parsed: ParsedArgs, json: boolean): Promise<void> {

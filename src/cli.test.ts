@@ -108,6 +108,15 @@ describe("tenants CLI", () => {
     expect(logs.join("\n")).toContain("auth confirm");
   });
 
+  test("principals group help is local-only text", async () => {
+    delete process.env["HASNA_TENANTS_API_URL"];
+    expect(await runCli(["principals", "help"])).toBe(0);
+    expect(errors).toEqual([]);
+    expect(logs.join("\n")).toContain("principals create");
+    expect(logs.join("\n")).toContain("principals token");
+    expect(logs.join("\n")).toContain("principals disable");
+  });
+
   test("visible auth commands route through the documented HTTP API", async () => {
     const cases: Array<{
       name: string;
@@ -191,6 +200,29 @@ describe("tenants CLI", () => {
         query: { kid: "kid-api" },
         apiKey: "hsk_api",
       },
+      {
+        name: "principal create",
+        args: ["principals", "create", "--key", "admin-key", "--tenant", "tenant-1", "--name", "Agent", "--kind", "agent", "--identity", "identity-1"],
+        method: "POST",
+        path: "/v1/principals",
+        body: { tenant_id: "tenant-1", display_name: "Agent", kind: "agent", identity_id: "identity-1" },
+        apiKey: "admin-key",
+      },
+      {
+        name: "principal token",
+        args: ["principals", "token", "--enrollment-secret", "hse_secret", "--app", "todos", "--scope", "todos:read", "--ttl", "60"],
+        method: "POST",
+        path: "/v1/principals/token",
+        body: { enrollment_secret: "hse_secret", app: "todos", scopes: ["todos:read"], ttlSeconds: 60 },
+      },
+      {
+        name: "principal disable",
+        args: ["principals", "disable", "--id", "00000000-0000-4000-8000-000000000000", "--key", "admin-key"],
+        method: "POST",
+        path: "/v1/principals/00000000-0000-4000-8000-000000000000/disable",
+        body: {},
+        apiKey: "admin-key",
+      },
     ];
 
     for (const item of cases) {
@@ -241,6 +273,46 @@ describe("tenants CLI", () => {
 // that the real server would refuse. These drive `runCli` against an ACTUAL
 // `createFetchHandler`, which is the only thing that proves a command is live.
 describe("tenants CLI against a real tenants server", () => {
+  test("service-principal create, token, and disable commands are live end to end", async () => {
+    const { fetch: handler } = await createTestFetchHandler();
+    installServerFetch(handler);
+
+    await runWithApiUrl(["auth", "signup", "--email", "principal-cli@example.com", "--password", "pw-pw-pw-pw"]);
+    const session = (JSON.parse(logs[0]!) as { session: string }).session;
+    logs = [];
+    await runWithApiUrl(["auth", "token", "--session", session, "--app", "tenants", "--scope", "tenants:write"]);
+    const adminToken = (JSON.parse(logs[0]!) as { access_token: string }).access_token;
+
+    logs = [];
+    await runWithApiUrl(["principals", "create", "--key", adminToken, "--name", "CLI agent"]);
+    const created = JSON.parse(logs[0]!) as {
+      principal: { service_principal_id: string };
+      enrollment_secret: string;
+    };
+    expect(created.enrollment_secret).toStartWith("hse_");
+
+    logs = [];
+    await runWithApiUrl([
+      "principals", "token", "--enrollment-secret", created.enrollment_secret,
+      "--app", "todos", "--scope", "todos:read", "--ttl", "60",
+    ]);
+    expect(JSON.parse(logs[0]!)).toMatchObject({
+      pt: "service",
+      service_principal_id: created.principal.service_principal_id,
+      expires_in: 60,
+    });
+
+    logs = [];
+    await runWithApiUrl(["principals", "disable", "--id", created.principal.service_principal_id, "--key", adminToken]);
+    expect(JSON.parse(logs[0]!)).toEqual({ disabled: true, service_principal_id: created.principal.service_principal_id });
+
+    logs = [];
+    const error = await runExpectingFailure([
+      "principals", "token", "--enrollment-secret", created.enrollment_secret, "--app", "todos",
+    ]);
+    expect(error).toContain("Invalid enrollment secret");
+  });
+
   test("introspect authenticates with an access token, and the server refuses a session", async () => {
     const { fetch: handler } = await createTestFetchHandler();
     installServerFetch(handler);

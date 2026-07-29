@@ -167,5 +167,13 @@ export function idpMigrations(apiKeysTable: string): Migration[] {
       `CREATE INDEX IF NOT EXISTS ${ISSUED_ACCESS_TOKENS_TABLE}_user_idx
          ON ${ISSUED_ACCESS_TOKENS_TABLE} (user_id, issued_at DESC)`,
     ),
+    // Enrollment credentials are random bearer secrets; only their SHA-256
+    // digest is stored in enrollment_secret_ref and looked up during exchange.
+    defineMigration(
+      "tenants_0014_service_principals_enrollment_ref_idx",
+      `CREATE INDEX IF NOT EXISTS ${SERVICE_PRINCIPALS_TABLE}_enrollment_ref_idx
+         ON ${SERVICE_PRINCIPALS_TABLE} (enrollment_secret_ref)
+       WHERE enrollment_secret_ref IS NOT NULL`,
+    ),
   ];
 }
