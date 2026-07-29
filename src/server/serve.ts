@@ -6,7 +6,7 @@
 //   GET  /version                   { status, version, backend }
 //   GET  /openapi.json              the OpenAPI document backing the generated SDK
 //   POST /signup|/login             public login front door (aliases of /v1/auth/*)
-//   /v1/auth/*                      public IdP: signup/login/verify/confirm/resend/token/revoke/whoami
+//   /v1/auth/*                      IdP: signup/login/verify/confirm/resend/token/revoke/introspect/whoami
 //   GET  /jwks, /v1/.well-known/... public JWKS (EdDSA) for offline token verification
 //   GET  /v1/introspect            authenticated, TENANT-SCOPED tenant/user binding lookup
 //
@@ -185,8 +185,9 @@ function sessionTokenFrom(req: Request, body: any): string {
 }
 
 /**
- * Public IdP surface (unauthenticated signup/login/verify + JWKS; session-bearer
- * token/whoami). Returns null when the request is not an auth/JWKS route.
+ * IdP surface (public signup/login/verify/JWKS/token-introspection;
+ * session-bearer token/revoke/whoami). Returns null when the request is not an
+ * auth/JWKS route.
  */
 async function handleAuth(h: Handler, req: Request, url: URL): Promise<Response | null> {
   const path = url.pathname;
@@ -235,6 +236,13 @@ async function handleAuth(h: Handler, req: Request, url: URL): Promise<Response 
     if (method === "POST" && path === "/v1/auth/revoke") {
       const body = await readJsonBody(req);
       return json(await h.auth.revokeToken({ jti: body.jti, sessionToken: sessionTokenFrom(req, body) }));
+    }
+    // Minimal public status lookup for apps that already verified a token via
+    // JWKS. The jti is an opaque revocation handle; no principal data is
+    // returned, and the response must never be cached.
+    if (method === "POST" && path === "/v1/auth/introspect") {
+      const body = await readJsonBody(req);
+      return json(await h.auth.introspectAccessToken({ jti: body.jti }), 200, { "cache-control": "no-store" });
     }
     if (method === "GET" && path === "/v1/auth/whoami") {
       return json(await h.auth.whoami(sessionTokenFrom(req, null)));

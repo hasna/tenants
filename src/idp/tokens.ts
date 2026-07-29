@@ -170,14 +170,11 @@ export interface VerifyAccessTokenOptions {
 /**
  * Fully verify an EdDSA access token: signature, issuer, audience, expiry.
  *
- * NOTE: this is the STATELESS check (usable offline by any app holding the
- * JWKS) — it CANNOT see revocations. The jti denylist (stamped via
- * POST /v1/auth/revoke) is enforced ONLY by the tenants service's own /v1
- * surface, and only within the token's bounded lifetime (≤24h). Apps that
- * verify via JWKS alone will keep accepting a revoked token until it expires;
- * there is NO fleet-wide revocation today. (/v1/introspect does not help — it
- * is a kid→tenant-binding lookup for the transitional HMAC keys, not a jti
- * revocation check.)
+ * NOTE: this function is the STATELESS check (usable offline by any app holding
+ * the JWKS), so it cannot see revocations by itself. Callers needing prompt
+ * revocation can layer the IdP's jti status lookup on top after this function
+ * succeeds. The separate GET /v1/introspect route is a kid→tenant-binding
+ * lookup for transitional HMAC keys, not an access-token revocation check.
  */
 export function verifyAccessToken(token: string, options: VerifyAccessTokenOptions): VerifyAccessTokenResult {
   const parts = token.split(".");

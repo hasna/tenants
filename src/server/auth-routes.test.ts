@@ -123,6 +123,40 @@ describe("Tenants IdP HTTP routes", () => {
     expect((await after.json()).reason).toBe("revoked");
   });
 
+  test("public jti introspection lets a JWKS verifier observe revocation", async () => {
+    const s = await fetchHandler(new Request("http://x/login", {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ email: "route@example.com", password: "pw-pw-pw-pw" }),
+    }));
+    const session = (await s.json()).session as string;
+    const tokenRes = await fetchHandler(new Request("http://x/v1/auth/token", {
+      method: "POST", headers: { "content-type": "application/json", authorization: `Bearer ${session}` },
+      // A non-tenants audience proves this is usable by an external JWKS verifier.
+      body: JSON.stringify({ app: "todos" }),
+    }));
+    const jti = String((await tokenRes.json()).jti);
+
+    const status = () => fetchHandler(new Request("http://x/v1/auth/introspect", {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ jti }),
+    }));
+
+    const before = await status();
+    expect(before.status).toBe(200);
+    expect(before.headers.get("cache-control")).toBe("no-store");
+    expect(await before.json()).toEqual({ active: true, jti });
+
+    const revoke = await fetchHandler(new Request("http://x/v1/auth/revoke", {
+      method: "POST", headers: { "content-type": "application/json", authorization: `Bearer ${session}` },
+      body: JSON.stringify({ jti }),
+    }));
+    expect(revoke.status).toBe(200);
+
+    const after = await status();
+    expect(after.status).toBe(200);
+    expect(await after.json()).toEqual({ active: false, jti });
+  });
+
   test("a valid-signature tenants token WITHOUT a jti is refused (401 missing_jti), never skipping the denylist", async () => {
     // Craft a JWS with the store's REAL signing key so signature/iss/aud/exp all
     // pass — only the jti claim is absent. Fail-closed means this must be 401.

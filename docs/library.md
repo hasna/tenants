@@ -84,8 +84,20 @@ if (!result.ok) throw new Error(result.reason);
 
 `verifyAccessToken` checks compact-JWS shape, EdDSA algorithm/signature, key ID,
 the fixed fleet issuer, optional audience, expiry, and issued-at time. It is
-stateless: it does not contact the access-token revocation registry. Consumers
-that verify offline may accept a revoked token until its maximum 24-hour expiry.
+stateless by itself. A verifier that needs prompt revocation can add the IdP
+lookup after a successful local check:
+
+```ts
+if (result.ok) {
+  const status = await client.introspectAccessToken({ jti: result.claims.jti });
+  if (!status.active) throw new Error("token inactive");
+}
+```
+
+The status endpoint returns `active:false` for unknown, expired, or revoked
+IDs and is marked `no-store`. It does not replace signature, issuer, or audience
+verification. Consumers that stay fully offline may still accept a revoked
+token until its maximum 24-hour expiry.
 
 ## Embedding the HTTP Handler
 

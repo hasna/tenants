@@ -1,7 +1,7 @@
 // OpenAPI 3.1 description of the @hasna/tenants HTTP API. This is the
 // single source of truth for both the running server routes and the generated
 // SDK. It describes ONLY the tenant-auth / IdP surface: signup / login / verify /
-// confirm / resend / token / whoami / JWKS / introspect. (The agent-identity CRUD
+// confirm / resend / token / whoami / JWKS / introspection. (The agent-identity CRUD
 // surface lives in the separate @hasna/identities package and is NOT here.)
 
 import { MAX_ACCESS_TOKEN_TTL_SECONDS } from "../idp/tokens.js";
@@ -96,6 +96,16 @@ export function buildOpenApiDocument(version: string) {
           type: "object",
           properties: { revoked: { type: "boolean" }, jti: { type: "string" } },
           required: ["revoked", "jti"],
+        },
+        TokenIntrospectionInput: {
+          type: "object",
+          properties: { jti: { type: "string", format: "uuid" } },
+          required: ["jti"],
+        },
+        TokenIntrospectionResponse: {
+          type: "object",
+          properties: { active: { type: "boolean" }, jti: { type: "string", format: "uuid" } },
+          required: ["active", "jti"],
         },
         AuthResponse: {
           type: "object",
@@ -243,6 +253,18 @@ export function buildOpenApiDocument(version: string) {
           security: [{ SessionBearer: [] }],
           requestBody: jsonBody("RevokeInput"),
           responses: jsonResponse("RevokeResponse"),
+        },
+      },
+      "/v1/auth/introspect": {
+        post: {
+          operationId: "introspectAccessToken",
+          summary:
+            "Check whether a locally verified access-token jti is registered, unexpired, and not revoked",
+          description:
+            "Public revocation-status lookup for JWKS verifiers. This does not verify a token or authenticate a caller; verify signature, issuer, audience, and claims locally before submitting the verified jti. Unknown, expired, and revoked ids all return active:false.",
+          security: [],
+          requestBody: jsonBody("TokenIntrospectionInput"),
+          responses: jsonResponse("TokenIntrospectionResponse"),
         },
       },
       "/v1/auth/whoami": {

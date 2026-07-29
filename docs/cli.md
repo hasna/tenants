@@ -100,8 +100,9 @@ tenants auth revoke --session <s> --jti <jti>
 
 The `jti` must be a UUID. Revocation is owner-scoped: another user's or an
 unknown token returns `revoked:false`. The tenants service rejects a revoked
-access token on its own authenticated `/v1` routes. Apps doing offline JWKS-only
-verification do not consult this denylist and may accept it until expiry.
+access token on its own authenticated `/v1` routes. External apps can query
+`POST /v1/auth/introspect` with a locally verified `jti`; apps that remain
+offline may accept a revoked token until expiry.
 
 ### Inspect the Session
 
@@ -131,10 +132,11 @@ a transitional HMAC API key. A session is never accepted. The caller needs
 tenants auth token --session hst_… --app tenants --scope tenants:read
 ```
 
-Introspection looks up a transitional API-key binding by `kid`. It is not JWT
-introspection and does not query a token `jti`. A binding is returned only when
-its tenant matches the authenticated caller; foreign, unknown, or unbound keys
-return `{ "active": false, "kid": "…" }`.
+This CLI introspection command looks up a transitional API-key binding by `kid`;
+it does not query a token `jti`. The HTTP/SDK access-token status operation is
+`POST /v1/auth/introspect` / `introspectAccessToken`. A key binding is returned
+only when its tenant matches the authenticated caller; foreign, unknown, or
+unbound keys return `{ "active": false, "kid": "…" }`.
 
 ## Error Output
 

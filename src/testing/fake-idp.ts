@@ -64,6 +64,10 @@ export class FakeIdpStore implements IdpStoreApi {
     return true;
   }
   async isAccessTokenRevoked(jti: string): Promise<boolean> { return (this.issued.get(jti)?.revokedAt ?? null) !== null; }
+  async isAccessTokenActive(jti: string, now: Date): Promise<boolean> {
+    const token = this.issued.get(jti);
+    return token !== undefined && token.revokedAt === null && token.expiresAt > now.getTime();
+  }
 }
 
 /**

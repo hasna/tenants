@@ -21,8 +21,9 @@ document store or identity CRUD API.
 - Publishes Ed25519 public keys as JWKS. Signing keys can be injected through the
   environment or generated once and persisted in Postgres.
 - Registers every access-token `jti` for owner-scoped early revocation. The
-  tenants HTTP service checks this denylist; offline JWKS consumers cannot see
-  revocations and may accept a revoked token until its bounded expiry.
+  tenants HTTP service checks this denylist, and external JWKS verifiers can
+  optionally query the public, minimal `jti` status endpoint after local token
+  verification. Fully offline consumers still rely on the bounded expiry.
 - Optionally returns a transitional HMAC API key when minting a token for the
   `tenants` audience. Those keys carry tenant/user bindings that can be queried
   through tenant-scoped introspection.
@@ -112,6 +113,7 @@ GET  /v1/auth/confirm?email=…&code=…              public
 POST /v1/auth/resend                             public
 POST /v1/auth/token                              Bearer session
 POST /v1/auth/revoke                             Bearer session
+POST /v1/auth/introspect                         public (verified jti status)
 GET  /v1/auth/whoami                             Bearer session
 GET  /v1/introspect?kid=…                        access token or API key
 ```

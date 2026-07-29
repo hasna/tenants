@@ -110,6 +110,8 @@ export interface IdpStoreApi {
   /** Stamp revoked_at on the caller's OWN token. Returns false when no owned, un-revoked row matches. */
   revokeIssuedAccessToken(jti: string, userId: string): Promise<boolean>;
   isAccessTokenRevoked(jti: string): Promise<boolean>;
+  /** True only for a registered token that is neither revoked nor expired. */
+  isAccessTokenActive(jti: string, now: Date): Promise<boolean>;
 }
 
 export class IdpStore implements IdpStoreApi {
@@ -445,6 +447,16 @@ export class IdpStore implements IdpStoreApi {
     const row = await this.client.get<{ jti: string }>(
       `SELECT jti FROM ${ISSUED_ACCESS_TOKENS_TABLE} WHERE jti = $1 AND revoked_at IS NOT NULL`,
       [jti],
+    );
+    return row !== null;
+  }
+
+  /** Public-introspection status: unknown, revoked, and expired all fail closed. */
+  async isAccessTokenActive(jti: string, now: Date): Promise<boolean> {
+    const row = await this.client.get<{ jti: string }>(
+      `SELECT jti FROM ${ISSUED_ACCESS_TOKENS_TABLE}
+         WHERE jti = $1 AND revoked_at IS NULL AND expires_at > $2`,
+      [jti, now.toISOString()],
     );
     return row !== null;
   }

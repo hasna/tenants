@@ -408,6 +408,19 @@ export class AuthService {
     return this.store.isAccessTokenRevoked(jti);
   }
 
+  /**
+   * Minimal status lookup for JWKS verifiers after they have verified the
+   * token locally. Only the opaque jti is echoed: unknown, revoked, and expired
+   * tokens are deliberately indistinguishable and all report active:false.
+   */
+  async introspectAccessToken(input: { jti?: string }): Promise<Record<string, unknown>> {
+    const jti = (input.jti ?? "").trim();
+    if (!jti) throw new AuthError(400, "jti is required.", "invalid_request");
+    if (!isUuid(jti)) throw new AuthError(400, "jti must be a UUID.", "invalid_request");
+    const active = await this.store.isAccessTokenActive(jti, new Date(this.now()));
+    return { active, jti };
+  }
+
   // ── whoami ───────────────────────────────────────────────────────────────────
 
   async whoami(sessionToken: string): Promise<Record<string, unknown>> {

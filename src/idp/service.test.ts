@@ -83,6 +83,10 @@ class FakeIdpStore implements IdpStoreApi {
     return true;
   }
   async isAccessTokenRevoked(jti: string): Promise<boolean> { return (this.issued.get(jti)?.revokedAt ?? null) !== null; }
+  async isAccessTokenActive(jti: string, now: Date): Promise<boolean> {
+    const token = this.issued.get(jti);
+    return token !== undefined && token.revokedAt === null && token.expiresAt > now.getTime();
+  }
 }
 
 function service(store: FakeIdpStore, otpEcho = false) {
@@ -231,6 +235,29 @@ describe("AuthService", () => {
     const res = await svc.revokeToken({ sessionToken: String(s.session), jti });
     expect(res.revoked).toBe(true);
     expect(await svc.isTokenRevoked(jti)).toBe(true);
+  });
+
+  test("access-token introspection fails closed for revoked, expired, and unknown jtis", async () => {
+    const store = new FakeIdpStore();
+    const svc = service(store);
+    const s = await svc.signup({ email: "status@example.com", name: "S", password: "pw-pw-pw-pw" });
+
+    const live = await svc.token({ sessionToken: String(s.session), app: "todos", ttlSeconds: 60 });
+    expect(await svc.introspectAccessToken({ jti: String(live.jti) }))
+      .toEqual({ active: true, jti: live.jti });
+
+    await svc.revokeToken({ sessionToken: String(s.session), jti: String(live.jti) });
+    expect(await svc.introspectAccessToken({ jti: String(live.jti) }))
+      .toEqual({ active: false, jti: live.jti });
+
+    const expired = await svc.token({ sessionToken: String(s.session), app: "todos", ttlSeconds: 60 });
+    store.issued.get(String(expired.jti))!.expiresAt = Date.now() - 1;
+    expect(await svc.introspectAccessToken({ jti: String(expired.jti) }))
+      .toEqual({ active: false, jti: expired.jti });
+
+    const unknown = newId();
+    expect(await svc.introspectAccessToken({ jti: unknown }))
+      .toEqual({ active: false, jti: unknown });
   });
 
   test("a principal cannot revoke ANOTHER user's token (owner-scoped, no leak)", async () => {

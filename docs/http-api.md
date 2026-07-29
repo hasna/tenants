@@ -16,7 +16,8 @@ routes and compatibility aliases are documented here.
 
 ## Authentication
 
-- **Public:** JWKS, signup, login, verify, confirm, and resend.
+- **Public:** JWKS, signup, login, verify, confirm, resend, and access-token
+  `jti` introspection.
 - **Session:** token, revoke, and whoami accept `Authorization: Bearer hst_…`.
   Token and revoke also accept a `session` property in the JSON body, but bearer
   authentication is preferred and is what the CLI sends.
@@ -150,8 +151,28 @@ their own registered token; unknown or foreign IDs do not reveal existence.
 Malformed non-UUID IDs return 400 `invalid_request`.
 
 Revocation is enforced by this service when a token is used on its `/v1`
-surface. Offline consumers cannot query the denylist and continue to rely on the
-token's bounded expiry.
+surface. External verifiers can opt into the status endpoint below; consumers
+that remain fully offline continue to rely on the token's bounded expiry.
+
+### `POST /v1/auth/introspect`
+
+```json
+{ "jti": "token UUID" }
+```
+
+This public endpoint is the revocation seam for JWKS verifiers. A consumer must
+first verify the token's signature, issuer, audience, timestamps, and claims
+locally, then submit the verified `jti`. It returns only:
+
+```json
+{ "active": true, "jti": "token UUID" }
+```
+
+Unknown, expired, and revoked IDs all return `active:false`, without principal
+or tenant details. Responses carry `Cache-Control: no-store` so a revocation is
+visible on the next lookup. Missing or malformed IDs return 400
+`invalid_request`. The endpoint does not verify a token and its response must
+never be used without the local JWKS checks.
 
 ### `GET /v1/auth/whoami`
 
@@ -170,7 +191,8 @@ Ed25519 OKP JWKs with `use: "sig"` and `alg: "EdDSA"`.
 ### `GET /v1/introspect?kid=…`
 
 Looks up the tenant/user binding for a transitional HMAC API key `kid`. This is
-not OAuth token introspection and does not accept a session or `jti`.
+not access-token introspection and does not accept a session or `jti`; use
+`POST /v1/auth/introspect` for the latter.
 
 The binding is returned only when its tenant equals the authenticated caller's
 tenant:
