@@ -18,9 +18,9 @@ export interface RevokeInput { "jti": string; "session"?: string }
 
 export interface RevokeResponse { "revoked": boolean; "jti": string }
 
-export interface AuthResponse { "session"?: string; "session_expires_in"?: number; "challenge"?: boolean; "purpose"?: string; "expires_in"?: number; "confirmation_required"?: boolean; "email_sent"?: boolean; "email_message_id"?: string; "principal"?: Record<string, unknown>; "tenants"?: Array<Record<string, unknown>>; "apps"?: Array<string> }
+export interface AuthResponse { "session"?: string; "session_expires_in"?: number; "challenge"?: boolean; "purpose"?: string; "expires_in"?: number; "confirmation_required"?: boolean; "email_sent"?: boolean; "email_message_id"?: string; "email_skipped_reason"?: string; "email_error"?: string; "dev_code"?: string; "user"?: Record<string, unknown>; "tenant"?: Record<string, unknown>; "memberships"?: Array<Record<string, unknown>>; "principal"?: Record<string, unknown>; "tenants"?: Array<Record<string, unknown>>; "apps"?: Array<string> }
 
-export interface TokenResponse { "access_token"?: string; "token_type"?: string; "alg"?: string; "kid"?: string; "aud"?: string; "tid"?: string; "uid"?: string; "pt"?: string; "scope"?: Array<string>; "expires_in"?: number; "jti"?: string; "api_key"?: string }
+export interface TokenResponse { "access_token"?: string; "token_type"?: string; "alg"?: string; "kid"?: string; "aud"?: string; "tid"?: string; "uid"?: string; "pt"?: string; "scope"?: Array<string>; "expires_in"?: number; "jti"?: string; "api_key"?: string; "api_key_kid"?: string; "api_key_expires_at"?: string | null }
 
 export interface WhoamiResponse { "principal"?: Record<string, unknown>; "tenants"?: Array<Record<string, unknown>>; "apps"?: Array<string> }
 

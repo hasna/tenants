@@ -18,7 +18,23 @@ export function buildOpenApiDocument(version: string) {
     servers: [{ url: "/" }],
     components: {
       securitySchemes: {
-        ApiKeyAuth: { type: "apiKey", in: "header", name: "x-api-key" },
+        SessionBearer: {
+          type: "http",
+          scheme: "bearer",
+          description: "Opaque hst_ session returned by login or OTP verification.",
+        },
+        FleetAccessToken: {
+          type: "http",
+          scheme: "bearer",
+          bearerFormat: "JWT",
+          description: "EdDSA access token with aud=tenants and the required tenants scope.",
+        },
+        ApiKeyAuth: {
+          type: "apiKey",
+          in: "header",
+          name: "x-api-key",
+          description: "Transitional HMAC API key with the required tenants scope.",
+        },
       },
       schemas: {
         ErrorResponse: {
@@ -93,6 +109,12 @@ export function buildOpenApiDocument(version: string) {
             confirmation_required: { type: "boolean" },
             email_sent: { type: "boolean" },
             email_message_id: { type: "string" },
+            email_skipped_reason: { type: "string" },
+            email_error: { type: "string" },
+            dev_code: { type: "string", description: "Present only when HASNA_TENANTS_OTP_ECHO=1 (development only)." },
+            user: { type: "object", additionalProperties: true },
+            tenant: { type: "object", additionalProperties: true },
+            memberships: { type: "array", items: { type: "object", additionalProperties: true } },
             principal: { type: "object", additionalProperties: true },
             tenants: { type: "array", items: { type: "object", additionalProperties: true } },
             apps: { type: "array", items: { type: "string" } },
@@ -114,6 +136,8 @@ export function buildOpenApiDocument(version: string) {
             expires_in: { type: "integer" },
             jti: { type: "string", description: "Token id — pass to POST /v1/auth/revoke to deny-list the token before exp." },
             api_key: { type: "string" },
+            api_key_kid: { type: "string" },
+            api_key_expires_at: { type: ["string", "null"] },
           },
         },
         WhoamiResponse: {
@@ -143,7 +167,6 @@ export function buildOpenApiDocument(version: string) {
         },
       },
     },
-    security: [{ ApiKeyAuth: [] }],
     paths: {
       "/v1/.well-known/jwks.json": {
         get: {
@@ -207,6 +230,7 @@ export function buildOpenApiDocument(version: string) {
         post: {
           operationId: "issueToken",
           summary: "Mint a per-app fleet access token from a session (Bearer session)",
+          security: [{ SessionBearer: [] }],
           requestBody: jsonBody("TokenInput"),
           responses: jsonResponse("TokenResponse"),
         },
@@ -216,6 +240,7 @@ export function buildOpenApiDocument(version: string) {
           operationId: "revokeToken",
           summary:
             "Revoke an issued access token by jti before its expiry (Bearer session; owner-scoped)",
+          security: [{ SessionBearer: [] }],
           requestBody: jsonBody("RevokeInput"),
           responses: jsonResponse("RevokeResponse"),
         },
@@ -224,6 +249,7 @@ export function buildOpenApiDocument(version: string) {
         get: {
           operationId: "whoami",
           summary: "Resolve the session principal + tenant memberships",
+          security: [{ SessionBearer: [] }],
           responses: jsonResponse("WhoamiResponse"),
         },
       },
@@ -232,6 +258,7 @@ export function buildOpenApiDocument(version: string) {
           operationId: "introspect",
           summary:
             "Introspect an issued key by kid (tenant/user binding + status). Tenant-scoped: bindings outside the caller's own tenant report active:false.",
+          security: [{ FleetAccessToken: [] }, { ApiKeyAuth: [] }],
           parameters: [{ name: "kid", in: "query", required: true, schema: { type: "string" } }],
           responses: jsonResponse("IntrospectResponse"),
         },
