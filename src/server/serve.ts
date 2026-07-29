@@ -1,9 +1,9 @@
-// HTTP API for @hasna/tenants (cloud / PURE REMOTE).
+// HTTP API for @hasna/tenants.
 //
 // Surfaces:
 //   GET  /health                    liveness (process up)
 //   GET  /ready                     readiness (DB reachable + schema migrated)
-//   GET  /version                   { status, version, mode }
+//   GET  /version                   { status, version, backend }
 //   GET  /openapi.json              the OpenAPI document backing the generated SDK
 //   POST /signup|/login             public login front door (aliases of /v1/auth/*)
 //   /v1/auth/*                      public IdP: signup/login/verify/confirm/resend/token/revoke/whoami
@@ -16,7 +16,8 @@
 
 import { ApiKeyStore, extractToken, hasAllScopes, verifyApiKey, type ApiKeyVerifier } from "@hasna/contracts/auth";
 import type { PoolQueryClient } from "../generated/storage-kit/index.js";
-import { createCloudClient, cloudHealth, cloudReady } from "../db.js";
+import { createTenantsDatabase, databaseHealth, databaseReady } from "../db.js";
+import { TENANTS_DATA_BACKEND } from "../storage.js";
 import { getPackageVersion } from "../version.js";
 import { buildOpenApiDocument } from "./openapi.js";
 import { IdpStore } from "../idp/store.js";
@@ -33,7 +34,7 @@ const JWKS_CACHE_TTL_MS = 60_000;
 export interface ServeOptions {
   port?: number;
   host?: string;
-  /** Provide a pre-built cloud client (tests). Otherwise built from env. */
+  /** Provide a pre-built database client (tests). Otherwise built from env. */
   client?: PoolQueryClient;
   /** Called on process close to release the pool (tests may omit). */
   close?: () => Promise<void>;
@@ -258,9 +259,9 @@ export async function buildHandler(options: ServeOptions = {}): Promise<Handler>
     client = options.client;
     close = options.close ?? (async () => undefined);
   } else {
-    const cloud = createCloudClient();
-    client = cloud.client;
-    close = cloud.close;
+    const db = createTenantsDatabase();
+    client = db.client;
+    close = db.close;
   }
   const signingSecret = resolveSigningSecret(options.signingSecret);
   const keys = new ApiKeyStore(client);
@@ -311,18 +312,18 @@ export async function createFetchHandler(options: ServeOptions = {}): Promise<{
     const path = url.pathname;
 
     if (path === "/health") {
-      return json({ status: "ok", version: handler.version, mode: "cloud" });
+      return json({ status: "ok", version: handler.version, backend: TENANTS_DATA_BACKEND });
     }
     if (path === "/version") {
-      return json({ status: "ok", version: handler.version, mode: "cloud" });
+      return json({ status: "ok", version: handler.version, backend: TENANTS_DATA_BACKEND });
     }
     if (path === "/ready") {
-      const ready = await cloudReady(handler.client);
+      const ready = await databaseReady(handler.client);
       return json(
         {
           status: ready.ok ? "ok" : "degraded",
           version: handler.version,
-          mode: "cloud",
+          backend: TENANTS_DATA_BACKEND,
           latencyMs: ready.latencyMs,
           pendingMigrations: ready.pendingMigrations,
           ...(ready.error ? { error: ready.error } : {}),
@@ -334,7 +335,7 @@ export async function createFetchHandler(options: ServeOptions = {}): Promise<{
       return json(openapi);
     }
     if (path === "/") {
-      return json({ name: "@hasna/tenants", status: "ok", version: handler.version, mode: "cloud" });
+      return json({ name: "@hasna/tenants", status: "ok", version: handler.version, backend: TENANTS_DATA_BACKEND });
     }
     // Public IdP surface (signup/login/verify/token/whoami + JWKS) — handled
     // before the authenticated /v1 gate.
@@ -356,7 +357,7 @@ export async function startServer(options: ServeOptions = {}): Promise<RunningSe
 
   const server = Bun.serve({ port, hostname: host, fetch });
   // Prove the DB path early (does not block liveness).
-  cloudHealth(handler.client).catch(() => undefined);
+  databaseHealth(handler.client).catch(() => undefined);
 
   return {
     port: server.port ?? port,

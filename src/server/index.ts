@@ -1,11 +1,12 @@
 #!/usr/bin/env bun
 // Entry point for the `tenants-serve` binary.
 //
-//   tenants-serve [--port N] [--host H]   start the HTTP API (cloud mode)
-//   tenants-serve migrate [--dry-run]     apply cloud schema migrations + seed
+//   tenants-serve [--port N] [--host H]   start the HTTP API
+//   tenants-serve migrate [--dry-run]     apply schema migrations + seed
 //   tenants-serve --version | --help
 
-import { createCloudClient, runTenantsMigrations } from "../db.js";
+import { createTenantsDatabase, runTenantsMigrations } from "../db.js";
+import { TENANTS_DATA_BACKEND } from "../storage.js";
 import { getPackageVersion } from "../version.js";
 import { startServer } from "./serve.js";
 import { seedAndBackfill } from "../idp/backfill.js";
@@ -20,11 +21,11 @@ function argValue(name: string): string | undefined {
 }
 
 function printHelp(): void {
-  console.log(`tenants-serve — @hasna/tenants cloud HTTP API
+  console.log(`tenants-serve — @hasna/tenants HTTP API
 
 Usage:
-  tenants-serve [options]           Start the HTTP API (PURE REMOTE cloud mode)
-  tenants-serve migrate [--dry-run] Apply cloud schema migrations + seed, then exit
+  tenants-serve [options]           Start the HTTP API
+  tenants-serve migrate [--dry-run] Apply schema migrations + seed, then exit
   tenants-serve --version           Print the package version
   tenants-serve --help              Show this help
 
@@ -33,8 +34,7 @@ Options:
   --host <host>   Host to bind (default: $HOST or 0.0.0.0)
 
 Environment:
-  HASNA_TENANTS_STORAGE_MODE=cloud            Required (PURE REMOTE)
-  HASNA_TENANTS_DATABASE_URL=postgres://...   Required Postgres URL
+  HASNA_TENANTS_DATABASE_URL=postgres://...   Required — the PostgreSQL backend
   HASNA_TENANTS_API_SIGNING_KEY=<hmac>        Required (or HASNA_API_SIGNING_KEY)
   HASNA_TENANTS_ALLOWED_EMAIL_DOMAINS=<list>  Exact domains; unset denies all auth
   HASNA_TENANTS_DISABLE_EMAIL_ALLOWLIST=1     Explicit local/dev opt-out
@@ -49,9 +49,9 @@ See docs/configuration.md for SES, AWS credentials, TLS, and developer settings.
 
 async function migrate(): Promise<void> {
   const dryRun = process.argv.includes("--dry-run");
-  const cloud = createCloudClient({ applicationName: "tenants-migrate" });
+  const db = createTenantsDatabase({ applicationName: "tenants-migrate" });
   try {
-    const result = await runTenantsMigrations(cloud.client, { dryRun });
+    const result = await runTenantsMigrations(db.client, { dryRun });
     const appliedIds = new Set(result.applied.map((a) => a.id));
     const pending = result.plan
       .filter((p) => p.state === "pending" && !appliedIds.has(p.migration.id))
@@ -65,7 +65,7 @@ async function migrate(): Promise<void> {
     // root-tenant UUID is written (never per-request).
     let backfill: unknown = { skipped: "dry-run" };
     if (!dryRun) {
-      backfill = await seedAndBackfill(cloud.client, API_KEYS_TABLE);
+      backfill = await seedAndBackfill(db.client, API_KEYS_TABLE);
     }
 
     console.log(
@@ -78,7 +78,7 @@ async function migrate(): Promise<void> {
       }, null, 2),
     );
   } finally {
-    await cloud.close();
+    await db.close();
   }
 }
 
@@ -108,7 +108,9 @@ async function main(): Promise<void> {
       }
     },
   });
-  console.log(`tenants-serve listening on http://${server.hostname}:${server.port} (mode=cloud)`);
+  console.log(
+    `tenants-serve listening on http://${server.hostname}:${server.port} (backend=${TENANTS_DATA_BACKEND})`,
+  );
 }
 
 main().catch((error) => {

@@ -1,4 +1,4 @@
-// OpenAPI 3.1 description of the @hasna/tenants cloud HTTP API. This is the
+// OpenAPI 3.1 description of the @hasna/tenants HTTP API. This is the
 // single source of truth for both the running server routes and the generated
 // SDK. It describes ONLY the tenant-auth / IdP surface: signup / login / verify /
 // confirm / resend / token / whoami / JWKS / introspect. (The agent-identity CRUD
@@ -13,7 +13,7 @@ export function buildOpenApiDocument(version: string) {
       title: "Tenants API",
       version,
       description:
-        "Hasna fleet tenant auth / IdP: tenants, users, memberships, service principals, sessions, and asymmetric (EdDSA) fleet token issuance with a published JWKS. Cloud mode is PURE REMOTE: all reads and writes hit the shared cloud Postgres directly.",
+        "Hasna fleet tenant auth / IdP: tenants, users, memberships, service principals, sessions, and asymmetric (EdDSA) fleet token issuance with a published JWKS. All reads and writes hit the service PostgreSQL database directly.",
     },
     servers: [{ url: "/" }],
     components: {
