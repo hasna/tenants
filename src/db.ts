@@ -25,7 +25,10 @@ import {
 import { tenantsMigrations } from "./migrations.js";
 import { resolveTenantsDatabase, type Env } from "./storage.js";
 
-/** App name this package reports to PostgreSQL and uses to build its env keys. */
+/**
+ * This package's app-name token. Its env keys are spelled out literally in
+ * src/storage.ts rather than derived from it — see the note there on why.
+ */
 export const TENANTS_APP_NAME = "tenants";
 
 export interface TenantsDatabase {

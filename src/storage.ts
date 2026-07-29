@@ -57,6 +57,12 @@ export const RETIRED_MODE_VALUES = [
   "hybrid",
 ] as const;
 
+// Both key lists are spelled out literally rather than derived from an app-name
+// token. That is deliberate: an operator debugging a startup failure greps for
+// the exact variable name, and a templated `HASNA_${token}_STORAGE_MODE` is
+// invisible to that grep. Losing a surface to a grep that could not match it is
+// how this vocabulary survived its previous removal pass.
+
 /** Canonical connection-string key first; the unprefixed alias is still read. */
 export const DATABASE_URL_ENV_KEYS = [
   "HASNA_TENANTS_DATABASE_URL",
