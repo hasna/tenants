@@ -34,14 +34,15 @@ bun add @hasna/tenants
 ```
 
 The package requires Bun 1.0 or newer. Running the service also requires a
-Postgres database and `HASNA_TENANTS_STORAGE_MODE=cloud`; there is no local
-database implementation in this package.
+PostgreSQL database, configured with `HASNA_TENANTS_DATABASE_URL`. PostgreSQL is
+the only data backend this package implements; there is no SQLite implementation
+and no deployment-mode variable to set.
 
 ## Surfaces
 
 | Surface | Entry |
 | --- | --- |
-| HTTP API | `tenants-serve` — Bun HTTP service in cloud/PURE REMOTE mode |
+| HTTP API | `tenants-serve` — Bun HTTP service over PostgreSQL |
 | CLI | `tenants` — thin client over the HTTP API |
 | SDK | `@hasna/tenants/sdk` — `TenantsClient` |
 | Library | `@hasna/tenants` — auth service, store, tokens, server helpers, and migrations |
@@ -52,7 +53,6 @@ database implementation in this package.
 Apply migrations and the idempotent seed/backfill:
 
 ```bash
-export HASNA_TENANTS_STORAGE_MODE=cloud
 export HASNA_TENANTS_DATABASE_URL='postgres://user:password@localhost:5432/tenants'
 export HASNA_TENANTS_API_SIGNING_KEY="$(openssl rand -hex 32)"
 export HASNA_TENANTS_ALLOWED_EMAIL_DOMAINS='example.com'
@@ -127,8 +127,7 @@ The minimum service configuration is:
 
 | Environment variable | Purpose |
 | --- | --- |
-| `HASNA_TENANTS_STORAGE_MODE=cloud` | Select the only service storage mode |
-| `HASNA_TENANTS_DATABASE_URL` | Postgres connection string |
+| `HASNA_TENANTS_DATABASE_URL` | PostgreSQL connection string — the only backend selector |
 | `HASNA_TENANTS_API_SIGNING_KEY` | HMAC secret; `HASNA_API_SIGNING_KEY` is the fallback |
 | `HASNA_TENANTS_ALLOWED_EMAIL_DOMAINS` | Comma-separated exact domains; unset or empty denies all front-door activity |
 

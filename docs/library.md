@@ -6,7 +6,7 @@
 | --- | --- |
 | `@hasna/tenants` | `AuthService`, `IdpStore`, policy/mailer/token helpers, IDs, migrations, database helpers, OpenAPI, and embeddable server handlers |
 | `@hasna/tenants/sdk` | `TenantsClient`, request/response interfaces, and `ApiError` |
-| `@hasna/tenants/db` | Cloud client, health/readiness, and migration runner |
+| `@hasna/tenants/db` | PostgreSQL client, health/readiness, and migration runner |
 | `@hasna/tenants/migrations` | `API_KEYS_TABLE` and the ordered migration set |
 
 The root package intentionally exports low-level domain and storage APIs for
@@ -109,18 +109,18 @@ returns `{ port, hostname, stop }`.
 
 ```ts
 import {
-  createCloudClient,
+  createTenantsDatabase,
   runTenantsMigrations,
-  cloudReady,
+  databaseReady,
 } from "@hasna/tenants/db";
 
-const cloud = createCloudClient({ applicationName: "example-service" });
+const db = createTenantsDatabase({ applicationName: "example-service" });
 try {
-  await runTenantsMigrations(cloud.client);
-  const ready = await cloudReady(cloud.client);
+  await runTenantsMigrations(db.client);
+  const ready = await databaseReady(db.client);
   if (!ready.ok) throw new Error("tenant schema is not ready");
 } finally {
-  await cloud.close();
+  await db.close();
 }
 ```
 

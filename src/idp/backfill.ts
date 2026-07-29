@@ -24,7 +24,7 @@ export interface BackfillResult {
 
 /**
  * Seed tenants + ensure a signing key + stamp legacy api_keys to the root tenant.
- * @param client       live cloud Postgres client
+ * @param client       live PostgreSQL client
  * @param apiKeysTable the api_keys table name (from @hasna/contracts auth kit)
  */
 export async function seedAndBackfill(

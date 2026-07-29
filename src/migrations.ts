@@ -1,4 +1,4 @@
-// Ordered, checksum-guarded schema migrations for @hasna/tenants (cloud Postgres).
+// Ordered, checksum-guarded schema migrations for @hasna/tenants (PostgreSQL).
 //
 // The set is: the canonical @hasna/contracts api_keys table, then the additive
 // tenancy/IdP layer (tenants, users, service_principals, memberships, sessions,

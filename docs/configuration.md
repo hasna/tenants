@@ -2,22 +2,43 @@
 
 ## Service Requirements
 
-`tenants-serve` always opens cloud Postgres. Although the vendored storage kit
-understands a generic `local` mode, this package does not implement local SQLite
-storage and refuses to start unless the resolved mode is `cloud`.
+`tenants-serve` has exactly one data backend: **PostgreSQL**, selected by
+`HASNA_TENANTS_DATABASE_URL`. There is no SQLite implementation in this package
+and there is no deployment-mode variable — nothing here branches on where the
+process runs or who operates it.
 
 | Environment variable | Required | Behavior |
 | --- | --- | --- |
-| `HASNA_TENANTS_STORAGE_MODE` | Yes | Must be `cloud`; deprecated `remote`, `hybrid`, and `self_hosted` values normalize to `cloud` |
-| `HASNA_TENANTS_DATABASE_URL` | Yes | Postgres connection string; `TENANTS_DATABASE_URL` is a lower-priority compatibility alias |
+| `HASNA_TENANTS_DATABASE_URL` | Yes | PostgreSQL connection string; `TENANTS_DATABASE_URL` is a lower-priority compatibility alias |
 | `HASNA_TENANTS_API_SIGNING_KEY` | Yes | HMAC secret for transitional `tenants` API keys |
 | `HASNA_API_SIGNING_KEY` | Fallback | Used only when the tenants-specific signing key is absent |
 | `PORT` | No | Server port, default `15460`; `--port` overrides it |
 | `HOST` | No | Bind host, default `0.0.0.0`; `--host` overrides it |
 
-The storage-mode alias `TENANTS_STORAGE_MODE` is also recognized after the
-canonical variable. Omitting storage mode resolves to generic `local`, which the
-service then rejects.
+### Retired: `HASNA_TENANTS_STORAGE_MODE`
+
+Deployment modes are removed. `HASNA_TENANTS_STORAGE_MODE` — and its unprefixed
+alias `TENANTS_STORAGE_MODE` — no longer select anything, and **setting either to
+any value is a startup error** that names the replacement variable and the fix:
+
+```
+HASNA_TENANTS_STORAGE_MODE is removed (set to 'self_hosted'): @hasna/tenants has
+no deployment modes. The server data backend is postgresql, selected by
+HASNA_TENANTS_DATABASE_URL. Fix: unset HASNA_TENANTS_STORAGE_MODE and set
+HASNA_TENANTS_DATABASE_URL=postgres://…
+```
+
+**Fix:** delete the variable from your task definition, compose file, or shell
+profile. Nothing needs to be set in its place — `HASNA_TENANTS_DATABASE_URL` was
+already required.
+
+It errors rather than being ignored because the previous behavior was the actual
+defect, not the vocabulary. `self_hosted`, `self-hosted`, `remote` and `hybrid`
+were rewritten to `cloud` **without a failure**, and an unset value resolved to
+`local` — a backend this service never implemented, so a missing connection
+string surfaced as "storage mode is not `cloud`" and pointed operators at the
+wrong variable. Silently accepting stale config is how the retired concept
+survives a release.
 
 ## Email Front Door
 

@@ -8,10 +8,10 @@ routes and compatibility aliases are documented here.
 
 | Method and path | Behavior |
 | --- | --- |
-| `GET /` | Service name, status, version, and `mode: "cloud"` |
+| `GET /` | Service name, status, version, and `backend: "postgresql"` |
 | `GET /health` | Process liveness; does not wait for a database probe |
 | `GET /ready` | Database/schema readiness, latency, and pending migration IDs; returns 503 when degraded |
-| `GET /version` | Status, package version, and mode |
+| `GET /version` | Status, package version, and data backend |
 | `GET /openapi.json` | OpenAPI 3.1 document |
 
 ## Authentication
